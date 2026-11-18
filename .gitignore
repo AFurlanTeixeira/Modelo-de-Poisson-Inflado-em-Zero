@@ -1,0 +1,125 @@
+# =============================================================================
+# BOAS PRÁTICAS
+# - Ignorar arquivos gerados, não arquivos fonte
+# - Manter dados brutos (data/raw/) versionados; ignorar apenas artefatos gerados
+# - Organizar por categoria para facilitar manutenção
+# =============================================================================
+
+
+# =============================================================================
+# SISTEMA OPERACIONAL — macOS
+# =============================================================================
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+
+# =============================================================================
+# SISTEMA OPERACIONAL — Windows
+# =============================================================================
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+
+# =============================================================================
+# SISTEMA OPERACIONAL — Linux
+# =============================================================================
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+
+# =============================================================================
+# IDEs — VS Code
+# =============================================================================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.code-workspace
+
+
+# =============================================================================
+# IDEs — JetBrains (IntelliJ, etc.)
+# =============================================================================
+.idea/
+*.iws
+*.iml
+
+
+# =============================================================================
+# IDEs — Cursor
+# =============================================================================
+.cursor/rules
+.cursorignore
+
+
+# =============================================================================
+# R
+# =============================================================================
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# renv (dependências ficam em renv.lock, versionado; a library local, não)
+renv/library/
+renv/local/
+renv/cellar/
+renv/python/
+renv/sandbox/
+renv/staging/
+
+# Testes e cobertura (testthat / covr)
+coverage.html
+lcov.info
+
+# R Markdown / Quarto (o .Rmd fica versionado; o HTML renderizado, não)
+*.knit.md
+*.utf8.md
+*_cache/
+*_files/
+docs/*.html
+docs/relatorio/*.html
+docs/relatorio/*.tex
+docs/relatorio/*.log
+docs/relatorio/*_files/
+
+
+# =============================================================================
+# VARIÁVEIS DE AMBIENTE
+# Manter arquivos .example commitados como referência
+# =============================================================================
+.env
+.env.*
+!.env.example
+
+
+# =============================================================================
+# DADOS E RESULTADOS GERADOS
+# data/raw/ é versionado (dataset original do enunciado); os resultados
+# intermediários (.rds) ficam fora do git. As figuras de docs/figuras/ e o
+# relatório em PDF são versionados, porque fazem parte da entrega.
+# =============================================================================
+data/processed/*
+!data/processed/.gitkeep
+*.png
+!docs/**/*.png
+*.rds
+
+
+# =============================================================================
+# LOGS E TEMPORÁRIOS
+# =============================================================================
+*.log
+.cache/
+.tmp/

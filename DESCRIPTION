@@ -1,0 +1,22 @@
+Package: zip.me524
+Title: Modelo de Poisson Inflado em Zero - Estimacao e Aplicacao Pratica
+Version: 0.1.0
+Description: Estima os parametros de um modelo de Poisson inflado em zero
+    (ZIP) para o numero anual de consultas medicas de clientes de um plano de
+    saude, separadamente por perfil de risco, via optim(), Newton-Raphson,
+    algoritmo EM e Gibbs Sampler, e usa as estimativas para precificar o
+    plano. Laboratorio 2 de ME524 (Unicamp, 2026).
+License: MIT
+Encoding: UTF-8
+Imports:
+    ggplot2,
+    patchwork,
+    coda
+Suggests:
+    testthat (>= 3.0.0),
+    covr,
+    rmarkdown,
+    knitr,
+    lintr,
+    styler
+Config/testthat/edition: 3
