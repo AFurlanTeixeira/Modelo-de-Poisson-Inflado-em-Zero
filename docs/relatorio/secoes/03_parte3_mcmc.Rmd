@@ -1,0 +1,155 @@
+# Parte 3. Inferência Bayesiana via MCMC
+
+## Questão 5: derivação das condicionais completas
+
+Com as prioris $p\sim\text{Beta}(1,1)$ e $\lambda\sim\text{Gamma}(1,\,0{,}01)$ (parametrização forma-taxa,
+$\pi(\lambda)\propto e^{-0{,}01\lambda}$) independentes, a posteriori conjunta aumentada é
+
+$$
+\pi(p,\lambda,\mathbf z\mid\mathbf y) \;\propto\; \prod_{i=1}^n
+\Big[p\,\mathbb 1\{y_i=0\}\Big]^{z_i}\Big[(1-p)\frac{e^{-\lambda}\lambda^{y_i}}{y_i!}\Big]^{1-z_i}
+\times p^{1-1}(1-p)^{1-1}\times \lambda^{1-1}e^{-0{,}01\lambda}.
+$$
+
+Cada condicional completa é obtida mantendo apenas os fatores que dependem da variável em questão.
+
+**Condicional de $Z_i$.** Só o $i$-ésimo fator depende de $z_i$:
+$P(Z_i=1\mid\cdot)\propto p\,\mathbb 1\{y_i=0\}$ e $P(Z_i=0\mid\cdot)\propto(1-p)e^{-\lambda}\lambda^{y_i}/y_i!$.
+Se $y_i>0$, o primeiro termo é zero e $Z_i=0$ com probabilidade 1. Se $y_i=0$, normalizando,
+
+$$
+Z_i\mid\cdot\sim\text{Bernoulli}\!\left(\frac{p}{p+(1-p)e^{-\lambda}}\right).
+$$
+
+**Interpretação.** O denominador é $P(Y_i=0)$ e o numerador é a parcela dessa probabilidade que vem do
+componente estrutural. Logo a probabilidade é $P(\text{zero estrutural}\mid Y_i=0,p,\lambda)$, a mesma
+quantidade que o peso $w_i$ do EM. A diferença é que o EM usa a esperança desse peso, enquanto o Gibbs
+**sorteia** a classificação. Quando $\lambda$ é grande, $e^{-\lambda}\approx 0$ e um zero observado é quase
+certamente estrutural (é improvável um cliente "ativo" com $\lambda=5$ não consultar). Quando $\lambda$ é
+pequeno, um zero é perfeitamente compatível com a Poisson e a probabilidade cai em direção a $p$.
+
+**Condicional de $p$.** Os fatores com $p$ são
+$\prod_i p^{z_i}(1-p)^{1-z_i} = p^{\sum z_i}(1-p)^{n-\sum z_i}$, que é o kernel de uma Beta:
+
+$$
+p\mid\mathbf z\;\propto\;p^{(1+\sum_i z_i)-1}(1-p)^{(1+n-\sum_i z_i)-1}
+\;\Rightarrow\; p\mid\mathbf z\sim\text{Beta}\Big(1+\sum_i z_i,\;1+n-\sum_i z_i\Big).
+$$
+
+**Condicional de $\lambda$.** Os fatores com $\lambda$ são
+$\prod_{i:z_i=0}e^{-\lambda}\lambda^{y_i}\times e^{-0{,}01\lambda}
+= \lambda^{\sum_{z_i=0}y_i}\,e^{-\lambda(0{,}01+\#\{i:z_i=0\})}$, o kernel de uma Gamma (forma, taxa):
+
+$$
+\lambda\mid\mathbf y,\mathbf z\sim\text{Gamma}\Big(1+\sum_{i:z_i=0}y_i,\;0{,}01+\sum_{i:z_i=0}1\Big).
+$$
+
+Ambas são atualizações conjugadas: a priori Beta "conta" os zeros estruturais imputados e a Gamma acumula as
+contagens e o tamanho do grupo Poisson. Como $z_i=1$ só ocorre quando $y_i=0$, temos $\sum_{z_i=0}y_i = S$.
+Para conferir, normalizamos numericamente os kernels (para uma configuração fixa de $\mathbf z$) e comparamos
+com as densidades Beta e Gamma deduzidas:
+
+```{r q5-script, file = arquivo_script("parte3_mcmc/q5_condicionais.R"), results = "hide"}
+```
+
+```{r q5-tabela, echo = FALSE}
+v <- verificacao
+v$erro_max_beta <- formatC(v$erro_max_beta, format = "e", digits = 1)
+v$erro_max_gamma <- formatC(v$erro_max_gamma, format = "e", digits = 1)
+kab(v,
+  col.names = c("Perfil", "$\\sum z_i$", "Erro relativo máx. (Beta)", "Erro relativo máx. (Gamma)"),
+  escape = FALSE, caption = "Kernel normalizado numericamente vs. densidade analítica."
+)
+```
+
+```{r q5-figura, echo = FALSE, fig.cap = "Kernels normalizados (tracejado) sobrepostos às densidades Beta e Gamma analíticas."}
+incluir_figura("parte3_mcmc/q5_condicionais.png")
+```
+
+## Questão 6: implementação do Gibbs Sampler
+
+Como apenas $\sum_i Z_i$ entra nas condicionais de $p$ e $\lambda$, e os $Z_i$ dos zeros são i.i.d. dado
+$(p,\lambda)$, sortear os $n_0$ indicadores e somá-los equivale exatamente a sortear
+$\sum_i Z_i\sim\text{Binomial}(n_0,\pi)$. Usamos essa forma em `gibbs_zip()` (`R/gibbs.R`), que é muito mais
+eficiente e produz a mesma cadeia em distribuição. Rodamos **`r cfg$n_cadeias` cadeias** de
+`r format(cfg$n_iter, big.mark = ".", decimal.mark = ",")` iterações a partir de pontos iniciais dispersos, descartando as
+`r format(cfg$burn_in, big.mark = ".", decimal.mark = ",")` primeiras de cada uma como burn-in.
+
+```{r q6-script, file = arquivo_script("parte3_mcmc/q6_gibbs.R"), results = "hide"}
+```
+
+```{r q6-tabela, echo = FALSE}
+kab(resumo,
+  digits = 4,
+  col.names = c("Perfil", "Parâmetro", "Média", "Mediana", "IC 95\\% (inf.)", "IC 95\\% (sup.)"),
+  escape = FALSE, caption = "Resumo a posteriori (cadeias empilhadas após o burn-in)."
+)
+```
+
+## Questão 7: diagnóstico de convergência
+
+```{r q7-script, file = arquivo_script("parte3_mcmc/q7_diagnostico.R"), results = "hide"}
+```
+
+```{r q7-fig-inicio, echo = FALSE, fig.cap = "Trajetórias das 3 cadeias nas primeiras 3.000 iterações (burn-in à esquerda da linha tracejada)."}
+incluir_figura("parte3_mcmc/q7_trajetorias_inicio.png")
+```
+
+```{r q7-fig-pos, echo = FALSE, fig.cap = "Trajetórias pós burn-in (cadeia 1) com a média acumulada (linha preta)."}
+incluir_figura("parte3_mcmc/q7_trajetorias_pos_burnin.png")
+```
+
+```{r q7-fig-acf, echo = FALSE, fig.cap = "Autocorrelação das cadeias (cadeia 1, pós burn-in)."}
+incluir_figura("parte3_mcmc/q7_autocorrelacao.png")
+```
+
+```{r q7-tabela, echo = FALSE}
+kab(diagnosticos,
+  digits = 3,
+  col.names = c("Perfil", "Parâmetro", "$\\hat R$ (Gelman-Rubin)", "Tamanho efetivo", "Autocorr. lag 1"),
+  escape = FALSE, caption = "Diagnósticos de convergência."
+)
+```
+
+**Comentário.** As três cadeias partem de valores bem distantes, por exemplo $(p,\lambda)=(0{,}95;\,10)$ e
+$(0{,}05;\,0{,}5)$, mas em poucas iterações se sobrepõem e passam a oscilar em torno da mesma região. O
+burn-in de 2.000 iterações é, portanto, bastante conservador. Após o burn-in as trajetórias têm aspecto de
+"lagarta peluda" (estacionárias, sem tendência) e as médias acumuladas estabilizam. A estatística de
+Gelman-Rubin é $\hat R\approx 1{,}00$ para todos os parâmetros e os tamanhos efetivos de amostra estão na
+casa das dezenas de milhares, suficientes para estimar quantis de 2,5% e 97,5% com precisão.
+
+A autocorrelação não é desprezível, sobretudo no **perfil baixo**: com muitos zeros ambíguos, $p$ e
+$\lambda$ são fortemente correlacionados a posteriori, e o aumento de dados faz o Gibbs mover-se em passos
+menores (o mesmo fenômeno de "informação ausente" que torna o EM lento nesse perfil). No **perfil alto**, com
+poucos zeros, a autocorrelação é quase nula e a cadeia se comporta praticamente como uma amostra i.i.d. Em
+resumo, não há sinais de falta de convergência.
+
+## Questão 8: comparação final
+
+```{r q8-script, file = arquivo_script("parte3_mcmc/q8_comparacao.R"), results = "hide"}
+```
+
+```{r q8-tabela, echo = FALSE}
+kab(comparacao,
+  digits = 4,
+  col.names = c("Perfil", "Método", "Parâmetro", "Estimativa", "IC 95\\% inf.", "IC 95\\% sup."),
+  escape = FALSE, caption = "Estimativas de máxima verossimilhança e Bayesianas."
+)
+```
+
+```{r q8-figura, echo = FALSE, fig.cap = "Densidades a posteriori (azul), EMV (linha vermelha) e IC de Wald de 95\\% (linhas vermelhas tracejadas)."}
+incluir_figura("parte3_mcmc/q8_posteriori_vs_emv.png")
+```
+
+**Os resultados são coerentes.** `optim()` (no melhor início), Newton-Raphson e EM produzem exatamente o
+mesmo EMV, como deveriam: são algoritmos diferentes para o mesmo problema de otimização. As medianas a
+posteriori ficam muito próximas dos EMV e os intervalos de credibilidade praticamente coincidem com os
+intervalos de Wald (construídos na escala $(\operatorname{logit} p, \log\lambda)$ por `ic_wald_zip()`). Isso
+é esperado: com $n=400$ por perfil e prioris pouco informativas (Beta uniforme e Gamma com média 100), a
+verossimilhança domina a posteriori e vale a aproximação de Bernstein–von Mises.
+
+As pequenas diferenças vão na direção esperada: a posteriori de $p$ é levemente assimétrica, sobretudo no
+perfil alto, onde $\hat p$ está mais perto da fronteira zero, mas as diferenças são uma pequena fração do
+erro-padrão. O intervalo Bayesiano respeita naturalmente o espaço paramétrico e não depende de normalidade
+assintótica. Comparando os perfis, $p$ diminui e $\lambda$ aumenta do perfil baixo para o alto: clientes de
+maior risco são menos frequentemente "não-consultantes" e, quando consultam, o fazem com mais frequência.

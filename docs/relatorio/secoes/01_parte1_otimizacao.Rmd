@@ -1,0 +1,208 @@
+# Parte 1. Otimização numérica
+
+## 1.1 EMV via `optim()`
+
+**Reparametrização.** Para eliminar as restrições $p\in(0,1)$ e $\lambda>0$ usamos
+$\theta_1 = \operatorname{logit}(p) = \log\frac{p}{1-p}\in\mathbb{R}$ e $\theta_2 = \log\lambda\in\mathbb{R}$,
+com inversas $p = 1/(1+e^{-\theta_1})$ e $\lambda = e^{\theta_2}$. Pela invariância do EMV,
+$\hat p = \operatorname{logit}^{-1}(\hat\theta_1)$ e $\hat\lambda = e^{\hat\theta_2}$. A função objetivo é
+`negloglik_theta()` e o ajuste é feito por `ajustar_optim()`, ambas em `R/otimizacao.R`. Testamos uma grade
+de 20 pontos iniciais, $p_0\in\{0{,}05;\,0{,}2;\,0{,}5;\,0{,}8;\,0{,}95\}$ e
+$\lambda_0\in\{0{,}5;\,1;\,3;\,8\}$, com dois algoritmos: Nelder-Mead (padrão do `optim()`) e BFGS.
+
+```{r q1-1-script, file = arquivo_script("parte1_otimizacao/q1_1_optim.R"), results = "hide"}
+```
+
+```{r q1-1-tabelas, echo = FALSE}
+kab(solucoes,
+  col.names = c(
+    "Perfil", "Método", "$\\hat p$", "$\\hat\\lambda$", "$\\ell$",
+    "convergence", "Nº de inícios"
+  ), escape = FALSE,
+  caption = "Soluções distintas encontradas pelo optim() nos 20 pontos iniciais."
+)
+kab(emv_optim,
+  digits = 5,
+  col.names = c("Perfil", "$\\hat p$", "$\\hat\\lambda$", "$\\ell(\\hat p,\\hat\\lambda)$"),
+  escape = FALSE, caption = "EMV via optim() (melhor solução entre todos os inícios)."
+)
+presos <- subset(multi, metodo == "BFGS" & p < 1e-4)
+n_presos <- table(factor(presos$perfil, levels = PERFIS))
+ll_preso_alto <- max(presos$loglik[presos$perfil == "alto"])
+```
+
+```{r q1-1-figura, echo = FALSE, fig.cap = "Frequências observadas, Poisson com a mesma média e ZIP ajustado pelo EMV."}
+incluir_figura("parte1_otimizacao/q1_1_ajuste_optim.png")
+```
+
+**Resultados.** O Nelder-Mead convergiu para a mesma solução nos 20 pontos iniciais em todos os perfis.
+O BFGS, porém, reportou `convergence = 0` (sucesso) em pontos com $\hat p \approx 0$ e $\hat\lambda=\bar y$
+em `r n_presos[["medio"]]` inícios do perfil médio e `r n_presos[["alto"]]` do perfil alto. Esses pontos
+têm log-verossimilhança bem menor que a solução global (no perfil alto, `r fmt_br(ll_preso_alto, 2)` contra
+`r fmt_br(emv_optim$loglik[3], 2)`), portanto **não são máximos**: são falsas convergências.
+
+A explicação vem da reparametrização. Pela regra da cadeia,
+$\partial\ell/\partial\theta_1 = p(1-p)\,\partial\ell/\partial p$. Quando o BFGS dá um passo grande na
+direção de $\theta_1\to-\infty$ (o que aconteceu a partir de inícios com $p_0$ alto), o fator
+$p(1-p)\to 0$ achata a superfície: o gradiente em $\theta_1$ fica numericamente nulo, embora
+$\partial\ell/\partial p$ seja positivo e grande nesse ponto (no perfil alto,
+$\partial\ell/\partial p|_{p=0,\lambda=\bar y} = n_0(e^{\bar y}-1)-n_+ \approx 3{.}000$). O otimizador
+declara convergência numa região plana que não é ótima. A lição é que **nunca se deve confiar em uma única
+execução**: comparar vários inícios e o valor de $\ell$ é indispensável. A Figura acima mostra que o ZIP
+ajustado reproduz bem as frequências observadas, ao contrário da Poisson.
+
+## 1.2 Análise crítica do método de Newton-Raphson
+
+### Questão 1: equações de score
+
+Seja $D(p,\lambda) = p + (1-p)e^{-\lambda} = P(Y=0)$. Note que $\partial D/\partial p = 1 - e^{-\lambda}$ e
+$\partial D/\partial \lambda = -(1-p)e^{-\lambda}$. Derivando $\ell$ termo a termo:
+
+$$
+U_p = \frac{\partial \ell}{\partial p} = \frac{n_0\,(1-e^{-\lambda})}{p+(1-p)e^{-\lambda}} - \frac{n_+}{1-p},
+\qquad
+U_\lambda = \frac{\partial \ell}{\partial \lambda} = -\frac{n_0\,(1-p)e^{-\lambda}}{p+(1-p)e^{-\lambda}}
+  + \frac{S}{\lambda} - n_+ .
+$$
+
+As condições de primeira ordem são $U_p = 0$ e $U_\lambda = 0$ (`score_zip()` em `R/verossimilhanca.R`).
+Elas admitem uma simplificação útil. Como $1 - D = (1-p)(1-e^{-\lambda})$, a equação $U_p=0$ equivale a
+$n_0(1-D) = n_+ D$, isto é,
+
+$$
+\hat D = \hat p + (1-\hat p)e^{-\hat\lambda} = \frac{n_0}{n}
+\qquad\text{(o modelo reproduz exatamente a proporção de zeros).}
+$$
+
+Substituindo $D = n_0/n$ em $U_\lambda = 0$ obtemos $n(1-p)e^{-\lambda} + n_+ = S/\lambda$. Usando também
+$n_+ = n(1-p)(1-e^{-\lambda})$ (que vem de $1-D = n_+/n$), somamos as duas relações e obtemos
+
+$$
+(1-\hat p)\,\hat\lambda = \bar y
+\qquad\text{e}\qquad
+\frac{\hat\lambda}{1-e^{-\hat\lambda}} = \frac{S}{n_+} = \bar y_+ .
+$$
+
+A segunda igualdade diz que a média de uma Poisson truncada em zero com parâmetro $\hat\lambda$ deve igualar
+a média das contagens positivas. É uma equação em uma variável só, que resolvemos com `uniroot()`
+(`emv_referencia()`) para ter uma **solução de referência** independente dos algoritmos iterativos. Ela tem
+solução interior se e só se $\bar y_+ > 1$ e $n_0/n > e^{-\hat\lambda}$, o que vale nos três perfis. O script
+abaixo verifica numericamente o score e as identidades.
+
+```{r q1-script, file = arquivo_script("parte1_otimizacao/q1_equacoes_score.R"), results = "hide"}
+```
+
+```{r q1-tabela, echo = FALSE}
+v <- verificacao
+v$erro_score_vs_numerico <- formatC(v$erro_score_vs_numerico, format = "e", digits = 1)
+v$norma_score_no_emv <- formatC(v$norma_score_no_emv, format = "e", digits = 1)
+kab(v,
+  digits = 5,
+  col.names = c(
+    "Perfil", "Erro score vs. numérico", "$\\lVert U(\\hat\\theta)\\rVert$", "$\\hat D$",
+    "$n_0/n$", "$(1-\\hat p)\\hat\\lambda$", "$\\bar y$"
+  ), escape = FALSE,
+  caption = "Verificação das equações de score no EMV de referência."
+)
+```
+
+### Questão 2: Hessiana, viabilidade e implementação do Newton-Raphson
+
+Derivando $U_p$ e $U_\lambda$ mais uma vez (usando $u = (1-p)e^{-\lambda}$, com
+$\partial u/\partial\lambda = -u$ e $D - u = p$):
+
+$$
+\frac{\partial^2\ell}{\partial p^2} = -\frac{n_0(1-e^{-\lambda})^2}{D^2} - \frac{n_+}{(1-p)^2},
+\qquad
+\frac{\partial^2\ell}{\partial p\,\partial\lambda} = \frac{n_0\, e^{-\lambda}}{D^2},
+\qquad
+\frac{\partial^2\ell}{\partial \lambda^2} = \frac{n_0\, p(1-p)e^{-\lambda}}{D^2} - \frac{S}{\lambda^2}.
+$$
+
+(Para a derivada cruzada:
+$\partial_\lambda[(1-e^{-\lambda})/D] = [e^{-\lambda}D + (1-e^{-\lambda})u]/D^2
+= e^{-\lambda}[p + (1-p)e^{-\lambda} + (1-p)(1-e^{-\lambda})]/D^2 = e^{-\lambda}/D^2$.)
+
+**Análise da Hessiana** $H(p,\lambda)$ (`hessiana_zip()`):
+
+* $\partial^2\ell/\partial p^2 < 0$ sempre: $\ell$ é côncava em $p$ para $\lambda$ fixo.
+* $\partial^2\ell/\partial\lambda^2$ tem sinal **indefinido**: o termo $n_0p(1-p)e^{-\lambda}/D^2$ é positivo
+  e pode dominar $-S/\lambda^2$. Em particular, $\ell$ **não é globalmente côncava**, ao contrário da Poisson.
+* A derivada cruzada é positiva e pode ser grande, então $\det H$ pode ficar negativo. Nessas regiões $H$ é
+  indefinida, a direção de Newton $-H^{-1}U$ pode não ser de subida e o passo pode levar a $p\notin(0,1)$ ou
+  $\lambda\le 0$, onde $\ell$ nem está definida.
+* Perto de $p\to 0$ ou $p\to 1$ e de $\lambda\to 0$ a Hessiana fica mal-condicionada.
+* No EMV, porém, $H$ é negativa-definida (autovalores na tabela abaixo) e, por continuidade, numa vizinhança
+  dele.
+
+```{r q2-script, file = arquivo_script("parte1_otimizacao/q2_newton_raphson.R"), results = "hide"}
+```
+
+```{r q2-autovalores, echo = FALSE}
+kab(data.frame(autovalor = c("1º", "2º"), autovalores),
+  digits = 2,
+  caption = "Autovalores da Hessiana no EMV (todos negativos)."
+)
+```
+
+```{r q2-fig-concav, echo = FALSE, fig.cap = "Curvas de nível de $\\ell$ e região onde a Hessiana é negativa-definida (azul). Ponto vermelho: EMV."}
+incluir_figura("parte1_otimizacao/q2_regiao_concavidade.png")
+```
+
+A região de concavidade cobre a vizinhança do EMV, mas não o espaço inteiro: no canto de $p$ pequeno e
+$\lambda$ grande a Hessiana é indefinida. Essa região é grande no perfil baixo (onde $S$ é pequeno e o termo
+$-S/\lambda^2$ pesa pouco), vira uma faixa estreita perto de $p=0$ no perfil médio e praticamente desaparece
+da grade no perfil alto.
+
+**Viabilidade.** O Newton-Raphson é viável, **desde que** iniciado numa vizinhança do EMV, onde a Hessiana é
+negativa-definida e a convergência é quadrática. Um início natural e barato é o **método dos momentos**
+(`inicio_momentos()`): de $E[Y]=(1-p)\lambda$ e $\operatorname{Var}(Y)=(1-p)\lambda(1+p\lambda)$ segue
+$p\lambda = \operatorname{Var}/E - 1$, logo
+
+$$
+\lambda_0 = \bar y + \frac{s^2}{\bar y} - 1,\qquad p_0 = \frac{s^2/\bar y - 1}{\lambda_0}.
+$$
+
+```{r q2-tabela-nr, echo = FALSE}
+t_nr <- nr[nr$iter %in% c(0:4, 10), ]
+t_nr$norma_score <- formatC(t_nr$norma_score, format = "e", digits = 2)
+kab(t_nr,
+  digits = 6,
+  col.names = c("Perfil", "Iter.", "$p$", "$\\lambda$", "$\\ell$", "$\\lVert U\\rVert$"),
+  escape = FALSE, caption = "Newton-Raphson (10 iterações) a partir do método dos momentos."
+)
+```
+
+```{r q2-fig-conv, echo = FALSE, out.width = "65%", fig.cap = "Norma do score ao longo das iterações do Newton-Raphson (escala log)."}
+incluir_figura("parte1_otimizacao/q2_convergencia_nr.png")
+```
+
+A norma do score cai aproximadamente ao quadrado a cada iteração (convergência quadrática): em 3 ou 4
+iterações o método atinge precisão de máquina e as seguintes não mudam nada. A comparação com o `optim()` e
+com a solução de referência:
+
+```{r q2-comparacao, echo = FALSE}
+kab(comparacao,
+  digits = 6,
+  col.names = c(
+    "Perfil", "$p$ optim", "$p$ NR", "$p$ ref.", "$\\lambda$ optim",
+    "$\\lambda$ NR", "$\\lambda$ ref."
+  ), escape = FALSE,
+  caption = "Comparação entre optim(), Newton-Raphson e a solução de referência (uniroot)."
+)
+kab(ruins,
+  digits = 4,
+  col.names = c("Perfil", "$p_0$", "$\\lambda_0$", "Iter. final", "$p$", "$\\lambda$", "Resultado"),
+  escape = FALSE, caption = "Newton-Raphson a partir de inícios ruins."
+)
+```
+
+As três soluções coincidem até a 5ª ou 6ª casa decimal; a diferença residual do `optim()` vem da sua
+tolerância e dos gradientes numéricos. Longe do EMV, porém, o passo de Newton frequentemente leva $p$ para
+fora de $(0,1)$ ou $\lambda$ para valores negativos. A falha não depende só de a Hessiana ser indefinida: no
+perfil alto ela é negativa-definida em quase toda a grade e, ainda assim, nenhum dos três inícios ruins
+convergiu. Mesmo com $H$ negativa-definida, o passo de Newton vai ao máximo da aproximação quadrática local,
+que fica longe da realidade quando $\ell$ é muito assimétrica, como perto da fronteira $p\to 0$, onde está o
+EMV do perfil alto. Concavidade local garante direção de subida, mas não um tamanho de passo adequado. Por
+isso o Newton-Raphson puro é viável aqui apenas com um bom ponto inicial (como o dos momentos) ou com
+salvaguardas de busca linear.

@@ -1,0 +1,77 @@
+---
+title: "Modelo de Poisson Inflado em Zero: Estimação e Aplicação Prática"
+subtitle: "Laboratório 2 — ME524, Unicamp (2026)"
+author:
+  - "Arthur Agostinho Furlan Teixeira, RA: 164363"
+  - "Caio Frare, RA: 242578"
+  - "João Paulo de Castro Alves, RA: 256481"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+lang: pt-BR
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+    fig_caption: true
+geometry: margin=2.2cm
+fontsize: 11pt
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{amsmath,amssymb}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+---
+
+```{r setup, include=FALSE}
+# O relatorio fica em docs/relatorio/; todo o codigo roda a partir da raiz do
+# repositorio, para que os scripts de cada pergunta usem os mesmos caminhos
+# relativos de quando rodados via `Rscript`.
+raiz <- normalizePath(file.path(getwd(), "..", ".."))
+knitr::opts_knit$set(root.dir = raiz)
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.align = "center", out.width = "95%"
+)
+secao <- function(nome) file.path(raiz, "docs", "relatorio", "secoes", nome)
+arquivo_script <- function(caminho) file.path(raiz, "scripts", caminho)
+incluir_figura <- function(caminho) knitr::include_graphics(file.path(raiz, "docs", "figuras", caminho))
+```
+
+```{r funcoes, include=FALSE}
+source("R/utils.R")
+carregar_funcoes()
+cfg <- config_lab()
+options(knitr.kable.NA = "--")
+kab <- function(x, ...) knitr::kable(x, booktabs = TRUE, row.names = FALSE, ...)
+brl <- function(x) paste0("R\\$ ", fmt_br(x, 2))
+```
+
+\newpage
+
+```{r, child = secao("00_introducao.Rmd")}
+```
+
+\newpage
+
+```{r, child = secao("01_parte1_otimizacao.Rmd")}
+```
+
+\newpage
+
+```{r, child = secao("02_parte2_em.Rmd")}
+```
+
+\newpage
+
+```{r, child = secao("03_parte3_mcmc.Rmd")}
+```
+
+\newpage
+
+```{r, child = secao("04_parte4_aplicacao.Rmd")}
+```
+
+```{r, child = secao("05_conclusao.Rmd")}
+```

@@ -1,0 +1,138 @@
+# Parte 4. Aplicação prática
+
+## Questão 9: valor esperado
+
+Pela representação de mistura, $Z\sim\text{Bernoulli}(p)$, $Y\mid Z=1\equiv 0$ e
+$Y\mid Z=0\sim\text{Poisson}(\lambda)$. Pela lei da esperança total,
+
+$$
+E[Y] = E\big[E[Y\mid Z]\big] = P(Z=1)\,E[Y\mid Z=1] + P(Z=0)\,E[Y\mid Z=0]
+= p\cdot 0 + (1-p)\cdot\lambda = (1-p)\lambda .
+$$
+
+(Verificação direta: $E[Y]=\sum_{k\ge1}k(1-p)e^{-\lambda}\lambda^k/k! = (1-p)\lambda\sum_{k\ge1}e^{-\lambda}
+\lambda^{k-1}/(k-1)! = (1-p)\lambda$.) Analogamente, pela lei da variância total,
+$\operatorname{Var}(Y) = E[\operatorname{Var}(Y\mid Z)] + \operatorname{Var}(E[Y\mid Z]) = (1-p)\lambda +
+\lambda^2p(1-p) = (1-p)\lambda(1+p\lambda)$, útil para avaliar o risco (`esperanca_zip()` e
+`variancia_zip()` em `R/aplicacao.R`). Uma checagem por Monte Carlo, simulando $10^6$ clientes pela
+representação de mistura com os EMV de cada perfil:
+
+```{r q9-script, file = arquivo_script("parte4_aplicacao/q9_valor_esperado.R"), results = "hide"}
+```
+
+```{r q9-tabela, echo = FALSE}
+kab(verificacao,
+  digits = 4,
+  col.names = c("Perfil", "Média MC", "Erro MC", "$(1-p)\\lambda$", "Var. MC", "$(1-p)\\lambda(1+p\\lambda)$"),
+  escape = FALSE, caption = "Média e variância simuladas vs. fórmulas fechadas."
+)
+```
+
+Com custo de R\$ 250 por consulta e lucro médio desejado de R\$ 100 por cliente, o custo esperado por
+cliente é $250\,E[Y]$, e o valor anual a cobrar é
+
+$$
+\text{Prêmio} = 250\,(1-p)\lambda + 100 .
+$$
+
+## Questão 10: valor cobrado por perfil e método
+
+Para o método Bayesiano reportamos duas versões: o *plug-in* das medianas a posteriori de $p$ e $\lambda$ (o
+que o enunciado pede) e a mediana a posteriori do próprio prêmio, calculada amostra a amostra, com seu
+intervalo de credibilidade.
+
+```{r q10-script, file = arquivo_script("parte4_aplicacao/q10_premio.R"), results = "hide"}
+```
+
+```{r q10-tabela, echo = FALSE}
+t10 <- data.frame(
+  Perfil = premios$perfil,
+  `$\\bar y$` = fmt_br(premios$media_amostral, 3),
+  optim = fmt_br(premios$optim, 2),
+  `Newton-Raphson` = fmt_br(premios$newton_raphson, 2),
+  EM = fmt_br(premios$em, 2),
+  `Bayes (plug-in)` = fmt_br(premios$bayes_plugin, 2),
+  `Bayes (mediana do prêmio)` = fmt_br(premios$bayes_mediana_premio, 2),
+  `IC 95% do prêmio` = paste0("[", fmt_br(premios$bayes_li, 2), "; ", fmt_br(premios$bayes_ls, 2), "]"),
+  check.names = FALSE
+)
+kab(t10,
+  escape = FALSE, align = "lrrrrrrr",
+  caption = "Valor anual a cobrar por cliente (R\\$) segundo cada método de estimação."
+)
+dif_ml <- max(abs(c(premios$optim, premios$newton_raphson) - premios$em))
+dif_bayes <- max(abs(premios$bayes_plugin - premios$em))
+```
+
+```{r q10-figura, echo = FALSE, out.width = "80%", fig.cap = "Prêmio anual por perfil e método; barras: IC de credibilidade de 95\\% do prêmio."}
+incluir_figura("parte4_aplicacao/q10_premios.png")
+```
+
+## Questão 11: análise
+
+**Os valores praticamente não diferem entre os métodos.** Entre `optim()`, Newton-Raphson e EM a diferença
+máxima é de `r brl(dif_ml)`, e o plug-in Bayesiano difere do EM em no máximo `r brl(dif_bayes)` por cliente
+por ano. Há uma razão teórica para isso. Mostramos na Questão 1 que o EMV satisfaz exatamente
+$(1-\hat p)\hat\lambda = \bar y$, logo os métodos de máxima verossimilhança produzem **o mesmo prêmio,
+$250\,\bar y + 100$**, independentemente de como dividem a média entre $p$ e $\lambda$. O Bayesiano difere
+minimamente porque (i) a mediana de um produto não é o produto das medianas e (ii) as prioris têm uma
+influência pequena. A incerteza amostral, medida pelo intervalo de credibilidade do prêmio (dezenas de
+reais), é muito maior do que a diferença entre métodos.
+
+**E se o método estiver mal-convergido?** Simulamos situações realistas:
+
+```{r q11-script, file = arquivo_script("parte4_aplicacao/q11_malconvergido.R"), results = "hide"}
+```
+
+```{r q11-tabela, echo = FALSE}
+t11 <- casos
+t11$p <- fmt_br(t11$p, 4)
+t11$lambda <- fmt_br(t11$lambda, 4)
+for (v in c("premio", "lucro_cliente", "resultado_carteira")) t11[[v]] <- fmt_br(t11[[v]], 2)
+kab(t11,
+  align = "llrrrrr", escape = FALSE,
+  col.names = c(
+    "Perfil", "Situação", "$p$", "$\\lambda$", "Prêmio (R\\$)",
+    "Lucro esp./cliente", "Resultado esp. (400 clientes)"
+  ),
+  caption = "Impacto de estimativas mal-convergidas (lucro esperado calculado com $E[Y]$ estimado por $\\bar y$)."
+)
+pior <- casos[casos$caso == "optim, maxit = 15", ]
+pior <- pior[which.min(pior$resultado_carteira), ]
+alto <- emv_em[emv_em$perfil == "alto", ]
+```
+
+```{r q11-figura, echo = FALSE, fig.cap = "Resultado esperado da carteira de 400 clientes em cada situação; linha tracejada: lucro desejado (R\\$ 40 mil)."}
+incluir_figura("parte4_aplicacao/q11_lucro_malconvergido.png")
+```
+
+Os resultados mostram situações bem distintas:
+
+1. **`optim()` interrompido cedo** é o caso perigoso. As estimativas ainda carregam o ponto inicial e
+   $(1-p)\lambda$ fica longe de $\bar y$. No perfil `r pior$perfil`, o prêmio cai para `r brl(pior$premio)`
+   e o lucro esperado por cliente fica em `r brl(pior$lucro_cliente)`: em vez de lucrar R\$ 40.000 com os
+   400 clientes, o plano teria resultado esperado de `r brl(pior$resultado_carteira)`. O erro não é ruído que
+   se compensa, é um **viés sistemático** na mesma direção para todos os contratos do perfil, e o prejuízo
+   cresce linearmente com o tamanho da carteira. Se o erro fosse para cima, o plano cobraria caro demais,
+   perderia competitividade e tenderia a reter apenas clientes de maior risco (seleção adversa).
+2. **MCMC curto e sem burn-in.** Com só 30 iterações a partir de um ponto ruim, a mediana ainda é contaminada
+   pelo início e o prêmio erra alguns reais. Nestes dados a cadeia mistura rápido, então o estrago é
+   moderado, mas sem diagnósticos não haveria como saber disso.
+3. **EM parado na 1ª iteração.** Os parâmetros ainda estão errados, mas o prêmio já é exatamente o correto,
+   porque, como mostramos na Questão 3, toda iteração do EM satisfaz $(1-p^{(t)})\lambda^{(t)}=\bar y$.
+4. **Falsa convergência do BFGS em $p=0$.** Também deixa o prêmio intacto, porque o EMV da Poisson satisfaz
+   $\hat\lambda = \bar y$.
+
+Os casos 3 e 4 trazem uma lição importante: **um prêmio correto não prova que o modelo esteja correto**. Como
+a precificação pela média depende apenas de $(1-p)\lambda$, ela é insensível a erros que preservam esse
+produto. Mas qualquer decisão que dependa da forma da distribuição seria afetada. A variância
+$(1-p)\lambda(1+p\lambda)$, que entra no cálculo de reservas técnicas e de margem de risco, seria subestimada
+(no caso extremo $p=0$ ela vira $\bar y$, contra `r fmt_br(variancia_zip(alto$p, alto$lambda), 2)` no perfil
+alto). A proporção de clientes que nunca usam o plano, relevante para descontos ou programas de prevenção,
+também ficaria errada. Por fim, se perfis diferentes fossem estimados com qualidades diferentes de
+convergência, a tabela de preços poderia até inverter a ordem de risco entre perfis.
+
+**Recomendações.** Sempre (i) rodar o otimizador a partir de vários inícios e comparar $\ell$; (ii) checar o
+gradiente no ponto final e as condições analíticas conhecidas (aqui, $\hat D = n_0/n$ e
+$(1-\hat p)\hat\lambda=\bar y$); (iii) para o EM, usar critério de parada rigoroso e monitorar $\ell$; (iv)
+para MCMC, usar várias cadeias, burn-in adequado e diagnósticos ($\hat R$, ESS, trajetórias).

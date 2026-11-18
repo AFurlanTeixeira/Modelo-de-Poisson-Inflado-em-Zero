@@ -1,0 +1,103 @@
+# Parte 2. Algoritmo EM
+
+## Questão 3: derivação dos passos E e M
+
+**Dados completos.** Com $Z_i\sim\text{Bernoulli}(p)$, $Y_i\mid Z_i=1$ degenerada em 0 e
+$Y_i\mid Z_i=0\sim\text{Poisson}(\lambda)$, a densidade conjunta de $(y_i,z_i)$ é
+$[p\,\mathbb 1\{y_i=0\}]^{z_i}\,[(1-p)e^{-\lambda}\lambda^{y_i}/y_i!]^{1-z_i}$. Tomando log (e omitindo
+constantes), chega-se a $\ell_c$ do enunciado, que é **linear** em $z_i$.
+
+**Passo E.** $Q(p,\lambda\mid p^{(t)},\lambda^{(t)}) = E[\ell_c \mid \mathbf y, p^{(t)},\lambda^{(t)}]$.
+Pela linearidade, basta trocar $z_i$ por $w_i = E[Z_i\mid y_i] = P(Z_i=1\mid y_i)$:
+
+$$
+Q = \sum_{i}\big[w_i\log p + (1-w_i)\log(1-p)\big] + \sum_i (1-w_i)\big[-\lambda + y_i\log\lambda\big].
+$$
+
+Pelo teorema de Bayes, $w_i = \dfrac{P(Y_i=y_i\mid Z_i=1)\,p}{P(Y_i=y_i)}$.
+
+* Se $y_i>0$: $P(Y_i=y_i\mid Z_i=1)=0$, logo $w_i = 0$. Uma contagem positiva nunca é zero estrutural.
+* Se $y_i=0$: $w_i = \dfrac{p^{(t)}}{p^{(t)} + (1-p^{(t)})e^{-\lambda^{(t)}}}$, a fração da probabilidade
+  de zero que se deve ao componente estrutural.
+
+**Passo M.** Igualando as derivadas de $Q$ a zero:
+
+$$
+\frac{\partial Q}{\partial p} = \frac{\sum_i w_i}{p} - \frac{\sum_i(1-w_i)}{1-p} = 0
+\;\Rightarrow\; p^{(t+1)} = \frac1n\sum_i w_i,
+$$
+$$
+\frac{\partial Q}{\partial \lambda} = \sum_i (1-w_i)\Big(-1 + \frac{y_i}{\lambda}\Big) = 0
+\;\Rightarrow\; \lambda^{(t+1)} = \frac{\sum_i (1-w_i)y_i}{\sum_i(1-w_i)}.
+$$
+
+As segundas derivadas ($-\sum w_i/p^2 - \sum(1-w_i)/(1-p)^2<0$ e $-\sum(1-w_i)y_i/\lambda^2<0$) confirmam
+que são máximos. Como $w_iy_i = 0$ sempre, o numerador de $\lambda^{(t+1)}$ é simplesmente $S$, e ambas as
+atualizações dependem só do peso comum dos zeros, $w$: $p^{(t+1)} = n_0w/n$ e
+$\lambda^{(t+1)} = S/(n - n_0 w)$.
+
+Uma consequência curiosa: $(1-p^{(t+1)})\lambda^{(t+1)} = \frac{n-n_0w}{n}\cdot\frac{S}{n-n_0w} = \bar y$.
+Ou seja, **a partir da primeira iteração o EM já reproduz exatamente a média amostral**, qualquer que seja o
+ponto inicial; as iterações seguintes só ajustam como essa média se divide entre $p$ e $\lambda$. Isso terá
+consequências na Parte 4.
+
+**Intuição.** $w_i$ é a probabilidade a posteriori (dados os parâmetros atuais) de que o cliente $i$ seja um
+"não-consultante" estrutural. $p^{(t+1)}$ é o **número esperado de zeros estruturais dividido por $n$**, ou
+seja, a proporção estimada desse grupo. $\lambda^{(t+1)}$ é a **média ponderada das contagens entre os
+clientes que de fato podem consultar**: cada cliente entra com peso $1-w_i$, sua probabilidade de pertencer
+ao grupo Poisson. Clientes com contagem positiva entram com peso 1; zeros entram parcialmente, como "zeros
+amostrais". Cada iteração do EM aumenta (não diminui) a log-verossimilhança observada.
+
+O script abaixo confere numericamente a derivação num passo a partir de $(p,\lambda) = (0{,}4;\,2{,}5)$: os
+pesos coincidem com a definição via Bayes, as fórmulas fechadas coincidem com a maximização numérica de $Q$ e
+a média é preservada.
+
+```{r q3-script, file = arquivo_script("parte2_em/q3_derivacao_em.R"), results = "hide"}
+```
+
+```{r q3-tabela, echo = FALSE}
+kab(verificacao,
+  digits = 5,
+  col.names = c(
+    "Perfil", "Erro passo E", "$p$ fechado", "$p$ numérico", "$\\lambda$ fechado",
+    "$\\lambda$ numérico", "$(1-p)\\lambda$", "$\\bar y$"
+  ), escape = FALSE,
+  caption = "Verificação de um passo do EM."
+)
+```
+
+## Questão 4: implementação
+
+A implementação está em `em_zip()` (`R/em.R`), com início $p_0 = 0{,}5$, $\lambda_0 = \bar y$ e
+tolerância $10^{-12}$ no incremento de $\ell$.
+
+```{r q4-script, file = arquivo_script("parte2_em/q4_em.R"), results = "hide"}
+```
+
+```{r q4-tabela, echo = FALSE}
+kab(emv_em,
+  digits = 6,
+  col.names = c("Perfil", "$\\hat p$", "$\\hat\\lambda$", "$\\ell$", "Iterações", "$\\ell$ monótona?"),
+  escape = FALSE, caption = "Estimativas pelo EM."
+)
+```
+
+```{r q4-figura, echo = FALSE, fig.cap = "Esquerda: log-verossimilhança observada ao longo das iterações do EM. Direita: distância ao máximo em escala log (convergência linear)."}
+incluir_figura("parte2_em/q4_convergencia_em.png")
+```
+
+A log-verossimilhança cresce monotonicamente em todos os perfis, como garante a teoria do EM, e estabiliza
+no mesmo valor encontrado pelo `optim()` e pelo Newton-Raphson. O gráfico à direita mostra que a distância ao
+máximo decresce **linearmente** em escala log, isto é, a convergência é linear, em contraste com a
+convergência quadrática do Newton-Raphson. A taxa depende da fração de informação ausente: no perfil baixo,
+onde a maioria das observações é zero e há muita incerteza sobre quais são estruturais, o EM precisa de mais
+iterações; no perfil alto, com poucos zeros, converge mais rápido. O EM também é robusto ao ponto inicial,
+inclusive no perfil alto, onde o BFGS falhou:
+
+```{r q4-robustez, echo = FALSE}
+kab(robustez,
+  digits = 10,
+  col.names = c("Perfil", "Amplitude de $\\hat p$", "Amplitude de $\\hat\\lambda$", "Iter. mín.", "Iter. máx."),
+  escape = FALSE, caption = "EM a partir de 9 inícios por perfil."
+)
+```

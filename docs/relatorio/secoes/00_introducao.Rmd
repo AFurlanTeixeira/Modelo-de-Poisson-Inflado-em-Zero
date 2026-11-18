@@ -1,0 +1,50 @@
+# Introdução e dados
+
+O objetivo é estimar os parâmetros $(p, \lambda)$ de um modelo de Poisson inflado em zero (ZIP) para o
+número anual de consultas médicas de clientes de um plano de saúde, separadamente para os perfis de risco
+`baixo`, `medio` e `alto`, usando três abordagens: otimização numérica da verossimilhança (`optim()` e
+Newton-Raphson), algoritmo EM e inferência Bayesiana via Gibbs Sampler. Ao final, usamos as estimativas
+para precificar o plano.
+
+**Organização do código.** As funções reutilizáveis (verossimilhança, score, Hessiana, EM, Gibbs, prêmio)
+ficam em `R/` e são testadas em `tests/testthat/`. Cada pergunta do enunciado tem seu próprio script em
+`scripts/parteN_*/`, que salva tabelas em `data/processed/` e figuras em `docs/figuras/`. Este relatório
+executa cada script no ponto correspondente e mostra o código na íntegra. As decisões de modelagem estão
+documentadas em `.ai/modelagem.md`. A semente usada nesta execução é `r cfg$seed`.
+
+## Dados
+
+```{r p0-script, file = arquivo_script("parte0_dados/resumo_descritivo.R"), results = "hide"}
+```
+
+```{r p0-tabela, echo = FALSE}
+kab(resumo,
+  digits = 3,
+  col.names = c(
+    "Perfil", "n", "Zeros", "Prop. zeros", "Média", "Variância",
+    "$e^{-\\bar y}$", "Máx."
+  ), escape = FALSE,
+  caption = "Resumo descritivo por perfil de risco."
+)
+```
+
+```{r p0-figura, echo = FALSE, fig.cap = "Frequência observada e frequência esperada por uma Poisson com a mesma média."}
+incluir_figura("parte0_dados/distribuicao_visitas.png")
+```
+
+Em todos os perfis a proporção observada de zeros é muito maior do que $e^{-\bar y}$, a proporção que
+uma Poisson com a mesma média preveria, e a variância supera a média (sobredispersão). Ambos os sinais são
+compatíveis com um modelo ZIP, já que sob o ZIP $\operatorname{Var}(Y) = (1-p)\lambda(1+p\lambda) > E[Y]$
+sempre que $p>0$.
+
+## Log-verossimilhança e estatísticas suficientes
+
+A log-verossimilhança depende dos dados somente por meio de $n_0 = \#\{i: y_i = 0\}$, $n_+ = n - n_0$ e
+$S = \sum_i y_i$, de modo que cada avaliação custa $O(1)$ (`estatisticas_suficientes()` em `R/dados.R`).
+Incluímos a constante $-\sum_i \log y_i!$ para que os valores reportados sejam a log-verossimilhança
+completa; ela não afeta nenhuma maximização (`loglik_zip()` em `R/verossimilhanca.R`):
+
+$$
+\ell(p,\lambda) = n_0 \log\!\big(p + (1-p)e^{-\lambda}\big) + n_+ \log(1-p) - n_+\lambda + S\log\lambda
+  - \sum_i \log y_i! .
+$$

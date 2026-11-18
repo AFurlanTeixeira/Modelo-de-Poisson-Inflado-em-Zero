@@ -1,0 +1,27 @@
+# Conclusão
+
+```{r conclusao, echo = FALSE}
+med <- function(g, v) resumo$mediana[resumo$perfil == g & resumo$param == v]
+kab(data.frame(
+  Perfil = PERFIS,
+  `p (EMV)` = emv_em$p, `lambda (EMV)` = emv_em$lambda,
+  `p (Bayes)` = vapply(PERFIS, med, numeric(1), v = "p"),
+  `lambda (Bayes)` = vapply(PERFIS, med, numeric(1), v = "lambda"),
+  `E[Y]` = esperanca_zip(emv_em$p, emv_em$lambda),
+  `Prêmio (R$)` = premio_anual(emv_em$p, emv_em$lambda),
+  check.names = FALSE
+), digits = 3, caption = "Resumo final por perfil.")
+```
+
+O modelo ZIP descreve bem os três perfis, que apresentam excesso de zeros claro. A probabilidade de zero
+estrutural cai do perfil baixo para o alto e a taxa de consultas dos clientes ativos sobe. Os métodos de
+máxima verossimilhança concordam entre si quando convergem de fato, e a inferência Bayesiana é coerente com
+eles. Do ponto de vista computacional, o Newton-Raphson é o mais rápido localmente mas frágil globalmente, o
+EM é lento mas robusto e monótono, o `optim()` exige vários inícios para evitar falsas convergências, e o
+Gibbs fornece a incerteza completa a um custo computacional maior. Para a precificação, o prêmio depende
+apenas de $(1-p)\lambda$, que a máxima verossimilhança estima exatamente por $\bar y$. Isso torna o preço
+robusto à escolha do método, **desde que** o algoritmo tenha convergido.
+
+```{r sessao, echo = FALSE}
+cat("Ambiente:", R.version.string, "| semente:", cfg$seed, "\n")
+```
