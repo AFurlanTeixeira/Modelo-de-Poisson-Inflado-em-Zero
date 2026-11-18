@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.0"
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::lintr, any::styler
+
+      - name: Lint (lintr)
+        run: |
+          Rscript -e '
+            dirs <- c("R", "scripts", "tests")
+            total <- 0
+            for (d in dirs) {
+              lints <- lintr::lint_dir(d)
+              print(lints)
+              total <- total + length(lints)
+            }
+            if (total > 0) quit(status = 1, save = "no")
+          '
+        shell: bash
+
+      - name: Verificar formatação (styler)
+        run: |
+          Rscript -e '
+            for (d in c("R", "scripts", "tests")) {
+              styler::style_dir(d, dry = "fail")
+            }
+          '
+        shell: bash
