@@ -257,4 +257,4 @@ A pasta `.ai/` contém os arquivos de contexto e as diretrizes do projeto para f
 
 [✓] Relatório final com código e texto explicativo
 
-[ ] Revisão final do grupo antes da entrega
+[✓] Revisão final do grupo antes da entrega
