@@ -25,53 +25,1517 @@ header-includes:
 ---
 
 ```{r setup, include=FALSE}
-# O relatorio fica em docs/relatorio/; todo o codigo roda a partir da raiz do
-# repositorio, para que os scripts de cada pergunta usem os mesmos caminhos
-# relativos de quando rodados via `Rscript`.
-raiz <- normalizePath(file.path(getwd(), "..", ".."))
-knitr::opts_knit$set(root.dir = raiz)
 knitr::opts_chunk$set(
   echo = TRUE, message = FALSE, warning = FALSE,
-  fig.align = "center", out.width = "95%"
+  fig.align = "center", out.width = "95%", fig.width = 8, fig.height = 3.6,
+  dev = "png", dpi = 150
 )
-secao <- function(nome) file.path(raiz, "docs", "relatorio", "secoes", nome)
-arquivo_script <- function(caminho) file.path(raiz, "scripts", caminho)
-incluir_figura <- function(caminho) knitr::include_graphics(file.path(raiz, "docs", "figuras", caminho))
-```
-
-```{r funcoes, include=FALSE}
-source("R/utils.R")
-carregar_funcoes()
-cfg <- config_lab()
 options(knitr.kable.NA = "--")
-kab <- function(x, ...) knitr::kable(x, booktabs = TRUE, row.names = FALSE, ...)
+
+library(kableExtra) # também reexporta knitr::kable()
+library(ggplot2)
+library(patchwork)
+library(coda)
+
+# Constantes do enunciado
+PERFIS <- c("baixo", "medio", "alto")
+CUSTO_CONSULTA <- 250
+LUCRO_DESEJADO <- 100
+PRIORI_P_A <- 1
+PRIORI_P_B <- 1
+PRIORI_LAMBDA_ALPHA <- 1
+PRIORI_LAMBDA_BETA <- 0.01
+
+# Parâmetros de execução
+SEMENTE <- 524
+N_ITER_GIBBS <- 20000
+BURN_IN <- 2000
+INICIOS_GIBBS <- list(c(0.05, 0.5), c(0.5, 3), c(0.95, 10))
+
+raiz <- normalizePath(file.path("..", ".."))
+dados <- read.csv(file.path(raiz, "data", "raw", "visitas_medicas.csv"))
+dados$perfil <- factor(dados$perfil, levels = PERFIS)
+
+# Formatação de números, tabelas e destaques
+fmt_br <- function(x, digitos = 4) {
+  formatC(x, format = "f", digits = digitos, big.mark = ".", decimal.mark = ",")
+}
 brl <- function(x) paste0("R\\$ ", fmt_br(x, 2))
+kab <- function(x, ...) kable(x, booktabs = TRUE, row.names = FALSE, ...)
+negrito <- function(texto, destaque) cell_spec(texto, format = "latex", bold = destaque)
+num <- function(x, digitos) format(round(x, digitos), trim = TRUE) # igual ao kable(digits = )
 ```
 
 \newpage
 
-```{r, child = secao("00_introducao.Rmd")}
+# Introdução e dados
+
+O objetivo é estimar os parâmetros $(p, \lambda)$ de um modelo de Poisson inflado em zero (ZIP) para o
+número anual de consultas médicas de clientes de um plano de saúde, separadamente para os perfis de risco
+`baixo`, `medio` e `alto`, usando três abordagens: otimização numérica da verossimilhança (`optim()` e
+Newton-Raphson), algoritmo EM e inferência Bayesiana via Gibbs Sampler. Ao final, usamos as estimativas
+para precificar o plano.
+
+**Organização do código.** O código que produz cada resultado aparece no ponto correspondente do texto.
+Funções reaproveitadas em mais de uma questão são definidas logo antes do primeiro uso. A semente usada
+nesta execução é `r SEMENTE`.
+
+## Dados
+
+```{r preparar-dados}
+y_list <- split(dados$visitas, dados$perfil)
+
+resumo_dados <- data.frame(
+  perfil = PERFIS,
+  n = sapply(y_list, length),
+  zeros = sapply(y_list, function(y) sum(y == 0)),
+  prop_zeros = sapply(y_list, function(y) mean(y == 0)),
+  media = sapply(y_list, mean),
+  variancia = sapply(y_list, var),
+  p0_poisson = sapply(y_list, function(y) exp(-mean(y))),
+  maximo = sapply(y_list, max),
+  row.names = NULL
+)
+
+freq <- do.call(rbind, lapply(PERFIS, function(g) {
+  y <- y_list[[g]]
+  k <- 0:max(y)
+  data.frame(
+    perfil = g, k = k,
+    observada = as.numeric(table(factor(y, levels = k))) / length(y),
+    poisson = dpois(k, mean(y))
+  )
+}))
+freq$perfil <- factor(freq$perfil, levels = PERFIS)
+```
+
+```{r tabela-resumo, echo = FALSE}
+t0 <- resumo_dados
+t0$prop_zeros <- negrito(num(t0$prop_zeros, 3), TRUE)
+t0$variancia <- negrito(num(t0$variancia, 3), TRUE)
+kab(t0,
+  digits = 3,
+  col.names = c(
+    "Perfil", "n", "Zeros", "Prop. zeros", "Média", "Variância",
+    "$e^{-\\bar y}$", "Máx."
+  ), escape = FALSE,
+  caption = "Resumo descritivo por perfil de risco. Em negrito, as colunas a comparar com $e^{-\\bar y}$ e com a média."
+)
+```
+
+```{r grafico-distribuicao, fig.cap = "Frequência observada e frequência esperada por uma Poisson com a mesma média."}
+ggplot(freq, aes(k)) +
+  geom_col(aes(y = observada), fill = "#4C78A8", alpha = 0.7) +
+  geom_point(aes(y = poisson), colour = "#E45756") +
+  geom_line(aes(y = poisson), colour = "#E45756") +
+  facet_wrap(~perfil, scales = "free") +
+  labs(
+    x = "Numero de consultas no ano", y = "Proporcao",
+    title = "Frequencia observada (barras) vs. Poisson com a mesma media (vermelho)"
+  ) +
+  theme_minimal(base_size = 10)
+```
+
+Em todos os perfis a proporção observada de zeros é muito maior do que $e^{-\bar y}$, a proporção que
+uma Poisson com a mesma média preveria, e a variância supera a média (sobredispersão). Ambos os sinais são
+compatíveis com um modelo ZIP, já que sob o ZIP $\operatorname{Var}(Y) = (1-p)\lambda(1+p\lambda) > E[Y]$
+sempre que $p>0$.
+
+## Log-verossimilhança e estatísticas suficientes
+
+A log-verossimilhança depende dos dados somente por meio de $n_0 = \#\{i: y_i = 0\}$, $n_+ = n - n_0$ e
+$S = \sum_i y_i$, de modo que cada avaliação custa $O(1)$ (`estatisticas_suficientes()`, abaixo).
+Incluímos a constante $-\sum_i \log y_i!$ para que os valores reportados sejam a log-verossimilhança
+completa; ela não afeta nenhuma maximização (`loglik_zip()`):
+
+$$
+\ell(p,\lambda) = n_0 \log\!\big(p + (1-p)e^{-\lambda}\big) + n_+ \log(1-p) - n_+\lambda + S\log\lambda
+  - \sum_i \log y_i! .
+$$
+
+```{r funcoes-verossimilhanca}
+estatisticas_suficientes <- function(y) {
+  list(n = length(y), n0 = sum(y == 0), np = sum(y > 0), S = sum(y), C = sum(lfactorial(y)))
+}
+s_list <- lapply(y_list, estatisticas_suficientes)
+
+loglik_zip <- function(p, lambda, s) {
+  if (!is.finite(p + lambda) || lambda <= 0 || p < 0 || p >= 1) {
+    return(-Inf)
+  }
+  if (p == 0) { # limite do ZIP: log-verossimilhança da Poisson
+    return(-s$n * lambda + s$S * log(lambda) - s$C)
+  }
+  s$n0 * log(p + (1 - p) * exp(-lambda)) + s$np * log(1 - p) -
+    s$np * lambda + s$S * log(lambda) - s$C
+}
 ```
 
 \newpage
 
-```{r, child = secao("01_parte1_otimizacao.Rmd")}
+# Parte 1. Otimização numérica
+
+## 1.1 EMV via `optim()`
+
+**Reparametrização.** Para eliminar as restrições $p\in(0,1)$ e $\lambda>0$ usamos
+$\theta_1 = \operatorname{logit}(p) = \log\frac{p}{1-p}\in\mathbb{R}$ e $\theta_2 = \log\lambda\in\mathbb{R}$,
+com inversas $p = 1/(1+e^{-\theta_1})$ e $\lambda = e^{\theta_2}$. Pela invariância do EMV,
+$\hat p = \operatorname{logit}^{-1}(\hat\theta_1)$ e $\hat\lambda = e^{\hat\theta_2}$. A função objetivo é
+`negloglik_theta()` e o ajuste é feito por `ajustar_optim()`, ambas definidas abaixo. Testamos uma grade
+de 20 pontos iniciais, $p_0\in\{0{,}05;\,0{,}2;\,0{,}5;\,0{,}8;\,0{,}95\}$ e
+$\lambda_0\in\{0{,}5;\,1;\,3;\,8\}$, com dois algoritmos: Nelder-Mead (padrão do `optim()`) e BFGS.
+
+```{r q1-1-optim}
+negloglik_theta <- function(theta, s) {
+  -loglik_zip(plogis(theta[1]), exp(theta[2]), s)
+}
+
+ajustar_optim <- function(s, p0, lambda0, metodo = "Nelder-Mead", maxit = 5000) {
+  ajuste <- optim(
+    c(qlogis(p0), log(lambda0)), negloglik_theta,
+    s = s, method = metodo, control = list(maxit = maxit, reltol = 1e-12)
+  )
+  c(
+    p = plogis(ajuste$par[1]), lambda = exp(ajuste$par[2]),
+    loglik = -ajuste$value, convergencia = ajuste$convergence,
+    n_avaliacoes = unname(ajuste$counts[1])
+  )
+}
+
+inicios_optim <- expand.grid(p0 = c(0.05, 0.2, 0.5, 0.8, 0.95), lambda0 = c(0.5, 1, 3, 8))
+multi_optim <- do.call(rbind, lapply(PERFIS, function(g) {
+  do.call(rbind, lapply(c("Nelder-Mead", "BFGS"), function(m) {
+    res <- t(mapply(
+      function(p0, l0) ajustar_optim(s_list[[g]], p0, l0, m),
+      inicios_optim$p0, inicios_optim$lambda0
+    ))
+    data.frame(perfil = g, metodo = m, inicios_optim, res, row.names = NULL)
+  }))
+}))
+multi_optim$perfil <- factor(multi_optim$perfil, levels = PERFIS)
+
+# Soluções distintas (arredondadas) e quantos inícios levaram a cada uma
+solucoes <- aggregate(
+  p0 ~ perfil + metodo + p + lambda + loglik + convergencia,
+  data = transform(multi_optim,
+    p = round(p, 4), lambda = round(lambda, 4), loglik = round(loglik, 3)
+  ),
+  FUN = length
+)
+names(solucoes)[names(solucoes) == "p0"] <- "n_inicios"
+solucoes <- solucoes[order(solucoes$perfil, solucoes$metodo, solucoes$loglik), ]
+
+emv_optim <- do.call(rbind, lapply(split(multi_optim, multi_optim$perfil), function(d) {
+  d[which.max(d$loglik), c("perfil", "p", "lambda", "loglik")]
+}))
+rownames(emv_optim) <- NULL
+
+presos <- subset(multi_optim, metodo == "BFGS" & p < 1e-4)
+n_presos <- table(factor(presos$perfil, levels = PERFIS))
+ll_preso_alto <- max(presos$loglik[presos$perfil == "alto"])
+
+ajuste <- do.call(rbind, lapply(PERFIS, function(g) {
+  y <- y_list[[g]]
+  e <- emv_optim[emv_optim$perfil == g, ]
+  k <- 0:max(y)
+  zip <- (1 - e$p) * dpois(k, e$lambda) + e$p * (k == 0)
+  rbind(
+    data.frame(
+      perfil = g, k = k, modelo = "Observada", prob = tabulate(y + 1, length(k)) / length(y)
+    ),
+    data.frame(perfil = g, k = k, modelo = "Poisson", prob = dpois(k, mean(y))),
+    data.frame(perfil = g, k = k, modelo = "ZIP (EMV)", prob = zip)
+  )
+}))
+ajuste$perfil <- factor(ajuste$perfil, levels = PERFIS)
+```
+
+```{r tab-q1-1-solucoes, echo = FALSE}
+t_sol <- solucoes
+melhor <- t_sol$loglik == ave(t_sol$loglik, t_sol$perfil, FUN = max)
+t_sol$loglik <- negrito(num(t_sol$loglik, 3), melhor)
+kab(t_sol,
+  col.names = c(
+    "Perfil", "Método", "$\\hat p$", "$\\hat\\lambda$", "$\\ell$",
+    "convergence", "Nº de inícios"
+  ), escape = FALSE,
+  caption = "Soluções distintas encontradas pelo optim() nos 20 pontos iniciais. Em negrito, a maior $\\ell$ de cada perfil."
+)
+```
+
+```{r tab-q1-1-emv, echo = FALSE}
+kab(emv_optim,
+  digits = 5,
+  col.names = c("Perfil", "$\\hat p$", "$\\hat\\lambda$", "$\\ell(\\hat p,\\hat\\lambda)$"),
+  escape = FALSE, caption = "EMV via optim() (melhor solução entre todos os inícios)."
+)
+```
+
+```{r fig-q1-1-ajuste, fig.cap = "Frequências observadas, Poisson com a mesma média e ZIP ajustado pelo EMV."}
+ggplot(ajuste, aes(k, prob, fill = modelo)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75) +
+  scale_fill_manual(
+    values = c(Observada = "grey55", Poisson = "#E45756", `ZIP (EMV)` = "#4C78A8")
+  ) +
+  facet_wrap(~perfil, scales = "free") +
+  labs(x = "Numero de consultas", y = "Probabilidade", fill = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+**Resultados.** O Nelder-Mead convergiu para a mesma solução nos 20 pontos iniciais em todos os perfis.
+O BFGS, porém, reportou `convergence = 0` (sucesso) em pontos com $\hat p \approx 0$ e $\hat\lambda=\bar y$
+em `r n_presos[["medio"]]` inícios do perfil médio e `r n_presos[["alto"]]` do perfil alto. Esses pontos
+têm log-verossimilhança bem menor que a solução global (no perfil alto, `r fmt_br(ll_preso_alto, 2)` contra
+`r fmt_br(emv_optim$loglik[3], 2)`), portanto **não são máximos**: são falsas convergências.
+
+A explicação vem da reparametrização. Pela regra da cadeia,
+$\partial\ell/\partial\theta_1 = p(1-p)\,\partial\ell/\partial p$. Quando o BFGS dá um passo grande na
+direção de $\theta_1\to-\infty$ (o que aconteceu a partir de inícios com $p_0$ alto), o fator
+$p(1-p)\to 0$ achata a superfície: o gradiente em $\theta_1$ fica numericamente nulo, embora
+$\partial\ell/\partial p$ seja positivo e grande nesse ponto (no perfil alto,
+$\partial\ell/\partial p|_{p=0,\lambda=\bar y} = n_0(e^{\bar y}-1)-n_+ \approx 3{.}000$). O otimizador
+declara convergência numa região plana que não é ótima. A lição é que **nunca se deve confiar em uma única
+execução**: comparar vários inícios e o valor de $\ell$ é indispensável. A Figura acima mostra que o ZIP
+ajustado reproduz bem as frequências observadas, ao contrário da Poisson.
+
+## 1.2 Análise crítica do método de Newton-Raphson
+
+### Questão 1: equações de score
+
+Seja $D(p,\lambda) = p + (1-p)e^{-\lambda} = P(Y=0)$. Note que $\partial D/\partial p = 1 - e^{-\lambda}$ e
+$\partial D/\partial \lambda = -(1-p)e^{-\lambda}$. Derivando $\ell$ termo a termo:
+
+$$
+U_p = \frac{\partial \ell}{\partial p} = \frac{n_0\,(1-e^{-\lambda})}{p+(1-p)e^{-\lambda}} - \frac{n_+}{1-p},
+\qquad
+U_\lambda = \frac{\partial \ell}{\partial \lambda} = -\frac{n_0\,(1-p)e^{-\lambda}}{p+(1-p)e^{-\lambda}}
+  + \frac{S}{\lambda} - n_+ .
+$$
+
+As condições de primeira ordem são $U_p = 0$ e $U_\lambda = 0$ (`score_zip()`, abaixo).
+Elas admitem uma simplificação útil. Como $1 - D = (1-p)(1-e^{-\lambda})$, a equação $U_p=0$ equivale a
+$n_0(1-D) = n_+ D$, isto é,
+
+$$
+\hat D = \hat p + (1-\hat p)e^{-\hat\lambda} = \frac{n_0}{n}
+\qquad\text{(o modelo reproduz exatamente a proporção de zeros).}
+$$
+
+Substituindo $D = n_0/n$ em $U_\lambda = 0$ obtemos $n(1-p)e^{-\lambda} + n_+ = S/\lambda$. Usando também
+$n_+ = n(1-p)(1-e^{-\lambda})$ (que vem de $1-D = n_+/n$), somamos as duas relações e obtemos
+
+$$
+(1-\hat p)\,\hat\lambda = \bar y
+\qquad\text{e}\qquad
+\frac{\hat\lambda}{1-e^{-\hat\lambda}} = \frac{S}{n_+} = \bar y_+ .
+$$
+
+A segunda igualdade diz que a média de uma Poisson truncada em zero com parâmetro $\hat\lambda$ deve igualar
+a média das contagens positivas. É uma equação em uma variável só, que resolvemos com `uniroot()`
+(`emv_referencia()`) para ter uma **solução de referência** independente dos algoritmos iterativos. Ela tem
+solução interior se e só se $\bar y_+ > 1$ e $n_0/n > e^{-\hat\lambda}$, o que vale nos três perfis. O código
+abaixo verifica numericamente o score e as identidades.
+
+```{r q1-score}
+score_zip <- function(p, lambda, s) {
+  e <- exp(-lambda)
+  d <- p + (1 - p) * e
+  c(
+    s$n0 * (1 - e) / d - s$np / (1 - p),
+    -s$n0 * (1 - p) * e / d + s$S / lambda - s$np
+  )
+}
+
+emv_referencia <- function(s) {
+  media_pos <- s$S / s$np
+  if (media_pos <= 1) stop("Sem solução interior: média das contagens positivas <= 1.")
+  f <- function(l) l / (1 - exp(-l)) - media_pos
+  lambda <- uniroot(f, c(1e-8, 1e3), tol = 1e-14)$root
+  c(p = 1 - (s$S / s$n) / lambda, lambda = lambda)
+}
+
+gradiente_numerico <- function(p, lambda, s, h = 1e-6) {
+  c(
+    (loglik_zip(p + h, lambda, s) - loglik_zip(p - h, lambda, s)) / (2 * h),
+    (loglik_zip(p, lambda + h, s) - loglik_zip(p, lambda - h, s)) / (2 * h)
+  )
+}
+
+ref <- t(vapply(s_list, emv_referencia, numeric(2)))
+emv_ref <- data.frame(perfil = PERFIS, p = ref[, "p"], lambda = ref[, "lambda"], row.names = NULL)
+
+verificacao <- do.call(rbind, lapply(PERFIS, function(g) {
+  s <- s_list[[g]]
+  p <- ref[g, "p"]
+  l <- ref[g, "lambda"]
+  ponto_teste <- c(0.3, 2) # ponto arbitrário, longe do EMV
+  data.frame(
+    perfil = g,
+    erro_score_vs_numerico = max(abs(
+      score_zip(ponto_teste[1], ponto_teste[2], s) -
+        gradiente_numerico(ponto_teste[1], ponto_teste[2], s)
+    )),
+    norma_score_no_emv = sqrt(sum(score_zip(p, l, s)^2)),
+    d_emv = p + (1 - p) * exp(-l),
+    n0_sobre_n = s$n0 / s$n,
+    media_zip = (1 - p) * l,
+    media_amostral = s$S / s$n
+  )
+}))
+```
+
+```{r tab-q1-score, echo = FALSE}
+v <- verificacao
+v$erro_score_vs_numerico <- formatC(v$erro_score_vs_numerico, format = "e", digits = 1)
+v$norma_score_no_emv <- formatC(v$norma_score_no_emv, format = "e", digits = 1)
+kab(v,
+  digits = 5,
+  col.names = c(
+    "Perfil", "Erro score vs. numérico", "$\\lVert U(\\hat\\theta)\\rVert$", "$\\hat D$",
+    "$n_0/n$", "$(1-\\hat p)\\hat\\lambda$", "$\\bar y$"
+  ), escape = FALSE,
+  caption = "Verificação das equações de score no EMV de referência."
+)
+```
+
+### Questão 2: Hessiana, viabilidade e implementação do Newton-Raphson
+
+Derivando $U_p$ e $U_\lambda$ mais uma vez (usando $u = (1-p)e^{-\lambda}$, com
+$\partial u/\partial\lambda = -u$ e $D - u = p$):
+
+$$
+\frac{\partial^2\ell}{\partial p^2} = -\frac{n_0(1-e^{-\lambda})^2}{D^2} - \frac{n_+}{(1-p)^2},
+\qquad
+\frac{\partial^2\ell}{\partial p\,\partial\lambda} = \frac{n_0\, e^{-\lambda}}{D^2},
+\qquad
+\frac{\partial^2\ell}{\partial \lambda^2} = \frac{n_0\, p(1-p)e^{-\lambda}}{D^2} - \frac{S}{\lambda^2}.
+$$
+
+(Para a derivada cruzada:
+$\partial_\lambda[(1-e^{-\lambda})/D] = [e^{-\lambda}D + (1-e^{-\lambda})u]/D^2
+= e^{-\lambda}[p + (1-p)e^{-\lambda} + (1-p)(1-e^{-\lambda})]/D^2 = e^{-\lambda}/D^2$.)
+
+**Análise da Hessiana** $H(p,\lambda)$ (`hessiana_zip()`):
+
+* $\partial^2\ell/\partial p^2 < 0$ sempre: $\ell$ é côncava em $p$ para $\lambda$ fixo.
+* $\partial^2\ell/\partial\lambda^2$ tem sinal **indefinido**: o termo $n_0p(1-p)e^{-\lambda}/D^2$ é positivo
+  e pode dominar $-S/\lambda^2$. Em particular, $\ell$ **não é globalmente côncava**, ao contrário da Poisson.
+* A derivada cruzada é positiva e pode ser grande, então $\det H$ pode ficar negativo. Nessas regiões $H$ é
+  indefinida, a direção de Newton $-H^{-1}U$ pode não ser de subida e o passo pode levar a $p\notin(0,1)$ ou
+  $\lambda\le 0$, onde $\ell$ nem está definida.
+* Perto de $p\to 0$ ou $p\to 1$ e de $\lambda\to 0$ a Hessiana fica mal-condicionada.
+* No EMV, porém, $H$ é negativa-definida (autovalores na tabela abaixo) e, por continuidade, numa vizinhança
+  dele.
+
+```{r q2-hessiana}
+hessiana_zip <- function(p, lambda, s) {
+  e <- exp(-lambda)
+  d <- p + (1 - p) * e
+  h_pp <- -s$n0 * (1 - e)^2 / d^2 - s$np / (1 - p)^2
+  h_pl <- s$n0 * e / d^2
+  h_ll <- s$n0 * p * (1 - p) * e / d^2 - s$S / lambda^2
+  matrix(c(h_pp, h_pl, h_pl, h_ll), 2, 2)
+}
+
+autovalores <- vapply(PERFIS, function(g) {
+  e <- emv_ref[emv_ref$perfil == g, ]
+  eigen(hessiana_zip(e$p, e$lambda, s_list[[g]]), symmetric = TRUE)$values
+}, numeric(2))
+
+grade <- do.call(rbind, lapply(PERFIS, function(g) {
+  s <- s_list[[g]]
+  pontos <- expand.grid(
+    p = seq(0.005, 0.995, length.out = 120),
+    lambda = seq(0.05, 10, length.out = 120)
+  )
+  pontos$ll <- mapply(loglik_zip, pontos$p, pontos$lambda, MoreArgs = list(s = s))
+  pontos$neg_def <- mapply(function(p, l) {
+    all(eigen(hessiana_zip(p, l, s), symmetric = TRUE, only.values = TRUE)$values < 0)
+  }, pontos$p, pontos$lambda)
+  pontos$ll_rel <- pmax(pontos$ll - max(pontos$ll), -150)
+  pontos$perfil <- g
+  pontos
+}))
+grade$perfil <- factor(grade$perfil, levels = PERFIS)
+emv_ref$perfil <- factor(emv_ref$perfil, levels = PERFIS)
+```
+
+```{r tab-q2-autovalores, echo = FALSE}
+kab(data.frame(autovalor = c("1º", "2º"), autovalores),
+  digits = 2,
+  caption = "Autovalores da Hessiana no EMV (todos negativos)."
+)
+```
+
+```{r fig-q2-concavidade, fig.height = 3.8, fig.cap = "Sinal da Hessiana (cor de fundo) e curvas de nível de $\\ell$ (linhas). Cada linha liga pontos com a mesma distância ao máximo de $\\ell$: quanto mais escura, mais perto do EMV (ponto vermelho). Os três painéis usam as mesmas camadas e os mesmos níveis."}
+ggplot(grade, aes(lambda, p)) +
+  geom_raster(aes(fill = neg_def)) +
+  geom_contour(
+    aes(z = ll_rel, colour = after_stat(factor(level))),
+    breaks = c(-100, -30, -10, -3, -1), linewidth = 0.35
+  ) +
+  geom_point(data = emv_ref, aes(shape = "EMV"), colour = "red", size = 2) +
+  scale_fill_manual(
+    values = c(`TRUE` = "#BCD4EA", `FALSE` = "#F6D2A8"),
+    labels = c(`TRUE` = "negativa-definida", `FALSE` = "indefinida"),
+    name = "Hessiana"
+  ) +
+  scale_colour_grey(start = 0.75, end = 0.05, name = "Log-verossimilhança\nmenos o máximo") +
+  scale_shape_manual(values = 16, name = NULL) +
+  facet_wrap(~perfil) +
+  labs(x = expression(lambda), y = "p") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom", legend.box = "vertical", legend.margin = margin())
+```
+
+A região de concavidade cobre a vizinhança do EMV, mas não o espaço inteiro: no canto de $p$ pequeno e
+$\lambda$ grande a Hessiana é indefinida. Essa região é grande no perfil baixo (onde $S$ é pequeno e o termo
+$-S/\lambda^2$ pesa pouco), vira uma faixa estreita perto de $p=0$ no perfil médio e praticamente desaparece
+da grade no perfil alto.
+
+**Viabilidade.** O Newton-Raphson é viável, **desde que** iniciado numa vizinhança do EMV, onde a Hessiana é
+negativa-definida e a convergência é quadrática. Um início natural e barato é o **método dos momentos**
+(`inicio_momentos()`): de $E[Y]=(1-p)\lambda$ e $\operatorname{Var}(Y)=(1-p)\lambda(1+p\lambda)$ segue
+$p\lambda = \operatorname{Var}/E - 1$, logo
+
+$$
+\lambda_0 = \bar y + \frac{s^2}{\bar y} - 1,\qquad p_0 = \frac{s^2/\bar y - 1}{\lambda_0}.
+$$
+
+```{r q2-newton-raphson}
+inicio_momentos <- function(y) {
+  m <- mean(y)
+  v <- var(y)
+  lambda0 <- m + v / m - 1
+  c(p0 = (v / m - 1) / lambda0, lambda0 = lambda0)
+}
+
+# Sem salvaguarda de passo de propósito: interrompe se sair do espaço paramétrico
+newton_raphson_zip <- function(s, p0, lambda0, n_iter = 10) {
+  theta <- c(p0, lambda0)
+  traj <- vector("list", n_iter + 1)
+  traj[[1]] <- data.frame(
+    iter = 0, p = p0, lambda = lambda0, loglik = loglik_zip(p0, lambda0, s),
+    norma_score = sqrt(sum(score_zip(p0, lambda0, s)^2))
+  )
+  for (k in seq_len(n_iter)) {
+    passo <- solve(hessiana_zip(theta[1], theta[2], s), score_zip(theta[1], theta[2], s))
+    theta <- theta - passo
+    valido <- all(is.finite(theta)) && theta[1] > 0 && theta[1] < 1 && theta[2] > 0
+    traj[[k + 1]] <- data.frame(
+      iter = k, p = theta[1], lambda = theta[2],
+      loglik = if (valido) loglik_zip(theta[1], theta[2], s) else NA_real_,
+      norma_score = if (valido) sqrt(sum(score_zip(theta[1], theta[2], s)^2)) else NA_real_
+    )
+    if (!valido) break
+  }
+  do.call(rbind, traj)
+}
+
+nr <- do.call(rbind, lapply(PERFIS, function(g) {
+  ini <- inicio_momentos(y_list[[g]])
+  data.frame(perfil = g, newton_raphson_zip(s_list[[g]], ini[["p0"]], ini[["lambda0"]], 10))
+}))
+nr$perfil <- factor(nr$perfil, levels = PERFIS)
+```
+
+```{r tab-q2-nr, echo = FALSE}
+t_nr <- nr[nr$iter %in% c(0:4, 10), ]
+convergiu <- t_nr$norma_score < 1e-8
+primeira <- convergiu & !duplicated(data.frame(t_nr$perfil, convergiu))
+t_nr$norma_score <- negrito(formatC(t_nr$norma_score, format = "e", digits = 2), primeira)
+kab(t_nr,
+  digits = 6,
+  col.names = c("Perfil", "Iter.", "$p$", "$\\lambda$", "$\\ell$", "$\\lVert U\\rVert$"),
+  escape = FALSE,
+  caption = "Newton-Raphson (10 iterações) a partir do método dos momentos. Em negrito, a primeira iteração com $\\lVert U\\rVert < 10^{-8}$."
+)
+```
+
+```{r fig-q2-convergencia, out.width = "65%", fig.width = 6, fig.height = 3.2, fig.cap = "Norma do score ao longo das iterações do Newton-Raphson (escala log)."}
+ggplot(subset(nr, norma_score > 0), aes(iter, norma_score, colour = perfil)) +
+  geom_line() +
+  geom_point() +
+  scale_y_log10() +
+  scale_x_continuous(breaks = 0:10) +
+  labs(x = "Iteracao", y = "Norma do score (escala log)", colour = "Perfil") +
+  theme_minimal(base_size = 10)
+```
+
+A norma do score cai aproximadamente ao quadrado a cada iteração (convergência quadrática): em 3 ou 4
+iterações o método atinge precisão de máquina e as seguintes não mudam nada. A comparação com o `optim()` e
+com a solução de referência:
+
+```{r q2-comparacao}
+final_nr <- nr[nr$iter == 10, ]
+comparacao <- data.frame(
+  perfil = PERFIS,
+  p_optim = emv_optim$p, p_nr = final_nr$p, p_ref = emv_ref$p,
+  lambda_optim = emv_optim$lambda, lambda_nr = final_nr$lambda, lambda_ref = emv_ref$lambda
+)
+
+inicios_ruins <- list(c(0.5, 1), c(0.1, 10), c(0.05, 0.5))
+ruins <- do.call(rbind, lapply(PERFIS, function(g) {
+  do.call(rbind, lapply(inicios_ruins, function(ini) {
+    traj <- newton_raphson_zip(s_list[[g]], ini[1], ini[2], 10)
+    ultimo <- traj[nrow(traj), ]
+    p_ref <- emv_ref$p[emv_ref$perfil == g]
+    resultado <- if (is.na(ultimo$loglik)) {
+      "saiu do domínio"
+    } else if (abs(ultimo$p - p_ref) < 1e-6) {
+      "convergiu ao EMV"
+    } else {
+      "outro ponto"
+    }
+    data.frame(
+      perfil = g, p0 = ini[1], lambda0 = ini[2], iter_final = ultimo$iter,
+      p = ultimo$p, lambda = ultimo$lambda, resultado = resultado
+    )
+  }))
+}))
+```
+
+```{r tab-q2-comparacao, echo = FALSE}
+kab(comparacao,
+  digits = 6,
+  col.names = c(
+    "Perfil", "$p$ optim", "$p$ NR", "$p$ ref.", "$\\lambda$ optim",
+    "$\\lambda$ NR", "$\\lambda$ ref."
+  ), escape = FALSE,
+  caption = "Comparação entre optim(), Newton-Raphson e a solução de referência (uniroot)."
+)
+```
+
+```{r tab-q2-ruins, echo = FALSE}
+t_ruins <- ruins
+t_ruins$resultado <- negrito(t_ruins$resultado, t_ruins$resultado == "convergiu ao EMV")
+kab(t_ruins,
+  digits = 4,
+  col.names = c("Perfil", "$p_0$", "$\\lambda_0$", "Iter. final", "$p$", "$\\lambda$", "Resultado"),
+  escape = FALSE, caption = "Newton-Raphson a partir de inícios ruins. Em negrito, os inícios que convergiram."
+)
+```
+
+As três soluções coincidem até a 5ª ou 6ª casa decimal; a diferença residual do `optim()` vem da sua
+tolerância e dos gradientes numéricos. Longe do EMV, porém, o passo de Newton frequentemente leva $p$ para
+fora de $(0,1)$ ou $\lambda$ para valores negativos. A falha não depende só de a Hessiana ser indefinida: no
+perfil alto ela é negativa-definida em quase toda a grade e, ainda assim, nenhum dos três inícios ruins
+convergiu. Mesmo com $H$ negativa-definida, o passo de Newton vai ao máximo da aproximação quadrática local,
+que fica longe da realidade quando $\ell$ é muito assimétrica, como perto da fronteira $p\to 0$, onde está o
+EMV do perfil alto. Concavidade local garante direção de subida, mas não um tamanho de passo adequado. Por
+isso o Newton-Raphson puro é viável aqui apenas com um bom ponto inicial (como o dos momentos) ou com
+salvaguardas de busca linear.
+
+\newpage
+
+# Parte 2. Algoritmo EM
+
+## Questão 3: derivação dos passos E e M
+
+**Dados completos.** Com $Z_i\sim\text{Bernoulli}(p)$, $Y_i\mid Z_i=1$ degenerada em 0 e
+$Y_i\mid Z_i=0\sim\text{Poisson}(\lambda)$, a densidade conjunta de $(y_i,z_i)$ é
+$[p\,\mathbb 1\{y_i=0\}]^{z_i}\,[(1-p)e^{-\lambda}\lambda^{y_i}/y_i!]^{1-z_i}$. Tomando log (e omitindo
+constantes), chega-se a $\ell_c$ do enunciado, que é **linear** em $z_i$.
+
+**Passo E.** $Q(p,\lambda\mid p^{(t)},\lambda^{(t)}) = E[\ell_c \mid \mathbf y, p^{(t)},\lambda^{(t)}]$.
+Pela linearidade, basta trocar $z_i$ por $w_i = E[Z_i\mid y_i] = P(Z_i=1\mid y_i)$:
+
+$$
+Q = \sum_{i}\big[w_i\log p + (1-w_i)\log(1-p)\big] + \sum_i (1-w_i)\big[-\lambda + y_i\log\lambda\big].
+$$
+
+Pelo teorema de Bayes, $w_i = \dfrac{P(Y_i=y_i\mid Z_i=1)\,p}{P(Y_i=y_i)}$.
+
+* Se $y_i>0$: $P(Y_i=y_i\mid Z_i=1)=0$, logo $w_i = 0$. Uma contagem positiva nunca é zero estrutural.
+* Se $y_i=0$: $w_i = \dfrac{p^{(t)}}{p^{(t)} + (1-p^{(t)})e^{-\lambda^{(t)}}}$, a fração da probabilidade
+  de zero que se deve ao componente estrutural.
+
+**Passo M.** Igualando as derivadas de $Q$ a zero:
+
+$$
+\frac{\partial Q}{\partial p} = \frac{\sum_i w_i}{p} - \frac{\sum_i(1-w_i)}{1-p} = 0
+\;\Rightarrow\; p^{(t+1)} = \frac1n\sum_i w_i,
+$$
+$$
+\frac{\partial Q}{\partial \lambda} = \sum_i (1-w_i)\Big(-1 + \frac{y_i}{\lambda}\Big) = 0
+\;\Rightarrow\; \lambda^{(t+1)} = \frac{\sum_i (1-w_i)y_i}{\sum_i(1-w_i)}.
+$$
+
+As segundas derivadas ($-\sum w_i/p^2 - \sum(1-w_i)/(1-p)^2<0$ e $-\sum(1-w_i)y_i/\lambda^2<0$) confirmam
+que são máximos. Como $w_iy_i = 0$ sempre, o numerador de $\lambda^{(t+1)}$ é simplesmente $S$, e ambas as
+atualizações dependem só do peso comum dos zeros, $w$: $p^{(t+1)} = n_0w/n$ e
+$\lambda^{(t+1)} = S/(n - n_0 w)$.
+
+Uma consequência curiosa: $(1-p^{(t+1)})\lambda^{(t+1)} = \frac{n-n_0w}{n}\cdot\frac{S}{n-n_0w} = \bar y$.
+Ou seja, **a partir da primeira iteração o EM já reproduz exatamente a média amostral**, qualquer que seja o
+ponto inicial; as iterações seguintes só ajustam como essa média se divide entre $p$ e $\lambda$. Isso terá
+consequências na Parte 4.
+
+**Intuição.** $w_i$ é a probabilidade a posteriori (dados os parâmetros atuais) de que o cliente $i$ seja um
+"não-consultante" estrutural. $p^{(t+1)}$ é o **número esperado de zeros estruturais dividido por $n$**, ou
+seja, a proporção estimada desse grupo. $\lambda^{(t+1)}$ é a **média ponderada das contagens entre os
+clientes que de fato podem consultar**: cada cliente entra com peso $1-w_i$, sua probabilidade de pertencer
+ao grupo Poisson. Clientes com contagem positiva entram com peso 1; zeros entram parcialmente, como "zeros
+amostrais". Cada iteração do EM aumenta (não diminui) a log-verossimilhança observada.
+
+O código abaixo confere numericamente a derivação num passo a partir de $(p,\lambda) = (0{,}4;\,2{,}5)$: os
+pesos coincidem com a definição via Bayes, as fórmulas fechadas coincidem com a maximização numérica de $Q$ e
+a média é preservada.
+
+```{r q3-verificacao}
+p_t <- 0.4
+lambda_t <- 2.5
+
+funcao_q <- function(par, y, w) {
+  p <- par[1]
+  l <- par[2]
+  sum(w * log(p) + (1 - w) * log(1 - p)) + sum((1 - w) * (-l + y * log(l)))
+}
+
+verificacao <- do.call(rbind, lapply(PERFIS, function(g) {
+  y <- y_list[[g]]
+  conj_z1 <- p_t * (y == 0)
+  conj_z0 <- (1 - p_t) * dpois(y, lambda_t)
+  w_bayes <- conj_z1 / (conj_z1 + conj_z0)
+  w <- ifelse(y == 0, p_t / (p_t + (1 - p_t) * exp(-lambda_t)), 0)
+
+  p_fechado <- mean(w)
+  lambda_fechado <- sum((1 - w) * y) / sum(1 - w)
+  num_q <- optim(
+    c(0.5, 1), function(par) -funcao_q(par, y, w),
+    method = "L-BFGS-B", lower = c(1e-6, 1e-6), upper = c(1 - 1e-6, 100)
+  )$par
+
+  data.frame(
+    perfil = g,
+    erro_passo_e = max(abs(w - w_bayes)),
+    p_fechado = p_fechado, p_numerico = num_q[1],
+    lambda_fechado = lambda_fechado, lambda_numerico = num_q[2],
+    media_apos_passo = (1 - p_fechado) * lambda_fechado,
+    media_amostral = mean(y)
+  )
+}))
+```
+
+```{r tab-q3, echo = FALSE}
+kab(verificacao,
+  digits = 5,
+  col.names = c(
+    "Perfil", "Erro passo E", "$p$ fechado", "$p$ numérico", "$\\lambda$ fechado",
+    "$\\lambda$ numérico", "$(1-p)\\lambda$", "$\\bar y$"
+  ), escape = FALSE,
+  caption = "Verificação de um passo do EM."
+)
+```
+
+## Questão 4: implementação
+
+A implementação está em `em_zip()`, abaixo, com início $p_0 = 0{,}5$, $\lambda_0 = \bar y$ e
+tolerância $10^{-12}$ no incremento de $\ell$.
+
+```{r q4-em}
+em_zip <- function(s, p0 = 0.5, lambda0 = s$S / s$n, tol = 1e-12, max_iter = 10000) {
+  p <- p0
+  lambda <- lambda0
+  ll <- numeric(max_iter + 1)
+  ll[1] <- loglik_zip(p, lambda, s)
+  for (t in seq_len(max_iter)) {
+    w <- p / (p + (1 - p) * exp(-lambda))
+    p <- s$n0 * w / s$n
+    lambda <- s$S / (s$n - s$n0 * w)
+    ll[t + 1] <- loglik_zip(p, lambda, s)
+    if (abs(ll[t + 1] - ll[t]) < tol) break
+  }
+  list(p = p, lambda = lambda, loglik = ll[seq_len(t + 1)], iter = t)
+}
+
+ajustes <- lapply(s_list, em_zip)
+
+emv_em <- data.frame(
+  perfil = PERFIS,
+  p = vapply(ajustes, `[[`, numeric(1), "p"),
+  lambda = vapply(ajustes, `[[`, numeric(1), "lambda"),
+  loglik = vapply(ajustes, function(a) a$loglik[length(a$loglik)], numeric(1)),
+  iter = vapply(ajustes, `[[`, integer(1), "iter"),
+  monotona = vapply(ajustes, function(a) all(diff(a$loglik) >= -1e-10), logical(1)),
+  row.names = NULL
+)
+
+traj_em <- do.call(rbind, lapply(PERFIS, function(g) {
+  ll <- ajustes[[g]]$loglik
+  data.frame(perfil = g, iter = seq_along(ll) - 1, loglik = ll, distancia = max(ll) - ll)
+}))
+traj_em$perfil <- factor(traj_em$perfil, levels = PERFIS)
+```
+
+```{r tab-q4, echo = FALSE}
+t_em <- emv_em
+t_em$iter <- negrito(t_em$iter, t_em$iter %in% range(t_em$iter))
+kab(t_em,
+  digits = 6,
+  col.names = c("Perfil", "$\\hat p$", "$\\hat\\lambda$", "$\\ell$", "Iterações", "$\\ell$ monótona?"),
+  escape = FALSE,
+  caption = "Estimativas pelo EM. Em negrito, o maior e o menor número de iterações."
+)
+```
+
+```{r fig-q4-convergencia, fig.height = 3.3, fig.cap = "Esquerda: log-verossimilhança observada ao longo das iterações do EM. Direita: distância ao máximo em escala log (convergência linear)."}
+fig_ll <- ggplot(traj_em, aes(iter, loglik, colour = perfil)) +
+  geom_line() +
+  geom_point(size = 0.6) +
+  facet_wrap(~perfil, scales = "free") +
+  labs(x = "Iteracao", y = "Log-verossimilhanca observada") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none")
+fig_dist <- ggplot(subset(traj_em, distancia > 0), aes(iter, distancia, colour = perfil)) +
+  geom_line() +
+  scale_y_log10() +
+  labs(x = "Iteracao", y = "l* - l(t) (escala log)", colour = NULL) +
+  theme_minimal(base_size = 10)
+wrap_plots(fig_ll, fig_dist, widths = c(2.2, 1))
+```
+
+A log-verossimilhança cresce monotonicamente em todos os perfis, como garante a teoria do EM, e estabiliza
+no mesmo valor encontrado pelo `optim()` e pelo Newton-Raphson. O gráfico à direita mostra que a distância ao
+máximo decresce **linearmente** em escala log, isto é, a convergência é linear, em contraste com a
+convergência quadrática do Newton-Raphson. A taxa depende da fração de informação ausente: no perfil baixo,
+onde a maioria das observações é zero e há muita incerteza sobre quais são estruturais, o EM precisa de mais
+iterações; no perfil alto, com poucos zeros, converge mais rápido. O EM também é robusto ao ponto inicial,
+inclusive no perfil alto, onde o BFGS falhou:
+
+```{r q4-robustez}
+inicios_em <- expand.grid(perfil = PERFIS, p0 = c(0.01, 0.5, 0.99), lambda0 = c(0.3, 3, 10))
+inicios_em$perfil <- as.character(inicios_em$perfil)
+res_em <- t(mapply(function(g, p0, l0) {
+  a <- em_zip(s_list[[g]], p0, l0)
+  c(p = a$p, lambda = a$lambda, iter = a$iter)
+}, inicios_em$perfil, inicios_em$p0, inicios_em$lambda0))
+multi_em <- data.frame(inicios_em, res_em, row.names = NULL)
+
+robustez <- do.call(rbind, lapply(PERFIS, function(g) {
+  d <- multi_em[multi_em$perfil == g, ]
+  data.frame(
+    perfil = g, amplitude_p = diff(range(d$p)), amplitude_lambda = diff(range(d$lambda)),
+    iter_min = min(d$iter), iter_max = max(d$iter)
+  )
+}))
+```
+
+```{r tab-q4-robustez, echo = FALSE}
+kab(robustez,
+  digits = 10,
+  col.names = c("Perfil", "Amplitude de $\\hat p$", "Amplitude de $\\hat\\lambda$", "Iter. mín.", "Iter. máx."),
+  escape = FALSE, caption = "EM a partir de 9 inícios por perfil."
+)
 ```
 
 \newpage
 
-```{r, child = secao("02_parte2_em.Rmd")}
+# Parte 3. Inferência Bayesiana via MCMC
+
+## Questão 5: derivação das condicionais completas
+
+Com as prioris $p\sim\text{Beta}(1,1)$ e $\lambda\sim\text{Gamma}(1,\,0{,}01)$ (parametrização forma-taxa,
+$\pi(\lambda)\propto e^{-0{,}01\lambda}$) independentes, a posteriori conjunta aumentada é
+
+$$
+\pi(p,\lambda,\mathbf z\mid\mathbf y) \;\propto\; \prod_{i=1}^n
+\Big[p\,\mathbb 1\{y_i=0\}\Big]^{z_i}\Big[(1-p)\frac{e^{-\lambda}\lambda^{y_i}}{y_i!}\Big]^{1-z_i}
+\times p^{1-1}(1-p)^{1-1}\times \lambda^{1-1}e^{-0{,}01\lambda}.
+$$
+
+Cada condicional completa é obtida mantendo apenas os fatores que dependem da variável em questão.
+
+**Condicional de $Z_i$.** Só o $i$-ésimo fator depende de $z_i$:
+$P(Z_i=1\mid\cdot)\propto p\,\mathbb 1\{y_i=0\}$ e $P(Z_i=0\mid\cdot)\propto(1-p)e^{-\lambda}\lambda^{y_i}/y_i!$.
+Se $y_i>0$, o primeiro termo é zero e $Z_i=0$ com probabilidade 1. Se $y_i=0$, normalizando,
+
+$$
+Z_i\mid\cdot\sim\text{Bernoulli}\!\left(\frac{p}{p+(1-p)e^{-\lambda}}\right).
+$$
+
+**Interpretação.** O denominador é $P(Y_i=0)$ e o numerador é a parcela dessa probabilidade que vem do
+componente estrutural. Logo a probabilidade é $P(\text{zero estrutural}\mid Y_i=0,p,\lambda)$, a mesma
+quantidade que o peso $w_i$ do EM. A diferença é que o EM usa a esperança desse peso, enquanto o Gibbs
+**sorteia** a classificação. Quando $\lambda$ é grande, $e^{-\lambda}\approx 0$ e um zero observado é quase
+certamente estrutural (é improvável um cliente "ativo" com $\lambda=5$ não consultar). Quando $\lambda$ é
+pequeno, um zero é perfeitamente compatível com a Poisson e a probabilidade cai em direção a $p$.
+
+**Condicional de $p$.** Os fatores com $p$ são
+$\prod_i p^{z_i}(1-p)^{1-z_i} = p^{\sum z_i}(1-p)^{n-\sum z_i}$, que é o kernel de uma Beta:
+
+$$
+p\mid\mathbf z\;\propto\;p^{(1+\sum_i z_i)-1}(1-p)^{(1+n-\sum_i z_i)-1}
+\;\Rightarrow\; p\mid\mathbf z\sim\text{Beta}\Big(1+\sum_i z_i,\;1+n-\sum_i z_i\Big).
+$$
+
+**Condicional de $\lambda$.** Os fatores com $\lambda$ são
+$\prod_{i:z_i=0}e^{-\lambda}\lambda^{y_i}\times e^{-0{,}01\lambda}
+= \lambda^{\sum_{z_i=0}y_i}\,e^{-\lambda(0{,}01+\#\{i:z_i=0\})}$, o kernel de uma Gamma (forma, taxa):
+
+$$
+\lambda\mid\mathbf y,\mathbf z\sim\text{Gamma}\Big(1+\sum_{i:z_i=0}y_i,\;0{,}01+\sum_{i:z_i=0}1\Big).
+$$
+
+Ambas são atualizações conjugadas: a priori Beta "conta" os zeros estruturais imputados e a Gamma acumula as
+contagens e o tamanho do grupo Poisson. Como $z_i=1$ só ocorre quando $y_i=0$, temos $\sum_{z_i=0}y_i = S$.
+Para conferir, normalizamos numericamente os kernels (para uma configuração fixa de $\mathbf z$) e comparamos
+com as densidades Beta e Gamma deduzidas:
+
+```{r q5-condicionais}
+log_conjunta <- function(p, lambda, s, soma_z) {
+  soma_z * log(p) + (s$n - soma_z) * log(1 - p) +
+    s$S * log(lambda) - (s$n - soma_z) * lambda +
+    (PRIORI_P_A - 1) * log(p) + (PRIORI_P_B - 1) * log(1 - p) +
+    (PRIORI_LAMBDA_ALPHA - 1) * log(lambda) - PRIORI_LAMBDA_BETA * lambda
+}
+
+normaliza <- function(x, logdens) {
+  dens <- exp(logdens - max(logdens))
+  dens / sum(dens * diff(x)[1])
+}
+
+res_q5 <- lapply(PERFIS, function(g) {
+  s <- s_list[[g]]
+  soma_z <- round(s$n0 / 2) # configuração arbitrária de z
+  emv <- emv_referencia(s)
+
+  grade_p <- seq(1e-4, 1 - 1e-4, length.out = 4000)
+  num_p <- normaliza(grade_p, log_conjunta(grade_p, emv[["lambda"]], s, soma_z))
+  beta_p <- dbeta(grade_p, PRIORI_P_A + soma_z, PRIORI_P_B + s$n - soma_z)
+
+  grade_l <- seq(0.01, 10, length.out = 4000)
+  num_l <- normaliza(grade_l, log_conjunta(emv[["p"]], grade_l, s, soma_z))
+  gamma_l <- dgamma(
+    grade_l,
+    shape = PRIORI_LAMBDA_ALPHA + s$S, rate = PRIORI_LAMBDA_BETA + s$n - soma_z
+  )
+
+  list(
+    verificacao = data.frame(
+      perfil = g, soma_z = soma_z,
+      erro_max_beta = max(abs(num_p - beta_p)) / max(beta_p),
+      erro_max_gamma = max(abs(num_l - gamma_l)) / max(gamma_l)
+    ),
+    curvas = rbind(
+      data.frame(perfil = g, param = "p", x = grade_p, numerica = num_p, analitica = beta_p),
+      data.frame(perfil = g, param = "lambda", x = grade_l, numerica = num_l, analitica = gamma_l)
+    )
+  )
+})
+verificacao <- do.call(rbind, lapply(res_q5, `[[`, "verificacao"))
+
+curvas <- do.call(rbind, lapply(res_q5, `[[`, "curvas"))
+curvas$perfil <- factor(curvas$perfil, levels = PERFIS)
+pico <- ave(curvas$analitica, curvas$perfil, curvas$param, FUN = max)
+curvas <- curvas[curvas$analitica > 1e-3 * pico, ]
 ```
+
+```{r tab-q5, echo = FALSE}
+v <- verificacao
+v$erro_max_beta <- formatC(v$erro_max_beta, format = "e", digits = 1)
+v$erro_max_gamma <- formatC(v$erro_max_gamma, format = "e", digits = 1)
+kab(v,
+  col.names = c("Perfil", "$\\sum z_i$", "Erro relativo máx. (Beta)", "Erro relativo máx. (Gamma)"),
+  escape = FALSE, caption = "Kernel normalizado numericamente vs. densidade analítica."
+)
+```
+
+```{r fig-q5-condicionais, fig.height = 4.2, fig.cap = "Kernels normalizados (tracejado) sobrepostos às densidades Beta e Gamma analíticas."}
+ggplot(curvas, aes(x)) +
+  geom_line(aes(y = analitica), colour = "#4C78A8", linewidth = 1.2, alpha = 0.6) +
+  geom_line(aes(y = numerica), colour = "#E45756", linetype = 2) +
+  facet_wrap(param ~ perfil, scales = "free", nrow = 2, labeller = labeller(.multi_line = FALSE)) +
+  labs(
+    x = NULL, y = "Densidade",
+    title = "Nucleo normalizado (tracejado) vs. Beta/Gamma analiticas"
+  ) +
+  theme_minimal(base_size = 10)
+```
+
+## Questão 6: implementação do Gibbs Sampler
+
+Como apenas $\sum_i Z_i$ entra nas condicionais de $p$ e $\lambda$, e os $Z_i$ dos zeros são i.i.d. dado
+$(p,\lambda)$, sortear os $n_0$ indicadores e somá-los equivale exatamente a sortear
+$\sum_i Z_i\sim\text{Binomial}(n_0,\pi)$. Usamos essa forma em `gibbs_zip()`, abaixo, que é muito mais
+eficiente e produz a mesma cadeia em distribuição. Rodamos **`r length(INICIOS_GIBBS)` cadeias** de
+`r format(N_ITER_GIBBS, big.mark = ".", decimal.mark = ",")` iterações a partir de pontos iniciais dispersos, descartando as
+`r format(BURN_IN, big.mark = ".", decimal.mark = ",")` primeiras de cada uma como burn-in.
+
+```{r q6-gibbs}
+gibbs_zip <- function(s, n_iter = 20000, p0 = 0.5, lambda0 = 1, seed = NULL,
+                      a = PRIORI_P_A, b = PRIORI_P_B,
+                      alpha = PRIORI_LAMBDA_ALPHA, beta = PRIORI_LAMBDA_BETA) {
+  if (!is.null(seed)) set.seed(seed)
+  saida <- matrix(NA_real_, n_iter, 3, dimnames = list(NULL, c("p", "lambda", "soma_z")))
+  p <- p0
+  lambda <- lambda0
+  for (t in seq_len(n_iter)) {
+    prob_estrutural <- p / (p + (1 - p) * exp(-lambda))
+    soma_z <- rbinom(1, s$n0, prob_estrutural)
+    p <- rbeta(1, a + soma_z, b + s$n - soma_z)
+    lambda <- rgamma(1, shape = alpha + s$S, rate = beta + s$n - soma_z)
+    saida[t, ] <- c(p, lambda, soma_z)
+  }
+  saida
+}
+
+# A cadeia k usa a semente SEMENTE + k
+cadeias <- lapply(s_list, function(s) {
+  lapply(seq_along(INICIOS_GIBBS), function(k) {
+    ini <- INICIOS_GIBBS[[k]]
+    gibbs_zip(s, N_ITER_GIBBS, ini[1], ini[2], seed = SEMENTE + k)
+  })
+})
+
+amostras <- do.call(rbind, lapply(PERFIS, function(g) {
+  do.call(rbind, lapply(seq_along(cadeias[[g]]), function(k) {
+    x <- cadeias[[g]][[k]][-seq_len(BURN_IN), , drop = FALSE]
+    data.frame(perfil = g, x, cadeia = k)
+  }))
+}))
+amostras$perfil <- factor(amostras$perfil, levels = PERFIS)
+
+resumo_post <- do.call(rbind, lapply(PERFIS, function(g) {
+  a <- amostras[amostras$perfil == g, ]
+  do.call(rbind, lapply(c("p", "lambda"), function(v) {
+    q <- quantile(a[[v]], c(0.025, 0.975), names = FALSE)
+    data.frame(
+      perfil = g, param = v, media = mean(a[[v]]), mediana = median(a[[v]]),
+      li = q[1], ls = q[2]
+    )
+  }))
+}))
+```
+
+```{r tab-q6, echo = FALSE}
+kab(resumo_post,
+  digits = 4,
+  col.names = c("Perfil", "Parâmetro", "Média", "Mediana", "IC 95\\% (inf.)", "IC 95\\% (sup.)"),
+  escape = FALSE, caption = "Resumo a posteriori (cadeias empilhadas após o burn-in)."
+)
+```
+
+## Questão 7: diagnóstico de convergência
+
+```{r q7-diagnostico}
+diagnosticos_mcmc <- function(cadeias_perfil, burn_in) {
+  lista <- mcmc.list(lapply(cadeias_perfil, function(ch) {
+    mcmc(ch[-seq_len(burn_in), c("p", "lambda")])
+  }))
+  rhat <- gelman.diag(lista, autoburnin = FALSE)$psrf[, 1]
+  ess <- effectiveSize(lista)
+  acf1 <- vapply(c("p", "lambda"), function(v) {
+    acf(lista[[1]][, v], plot = FALSE, lag.max = 1)$acf[2]
+  }, numeric(1))
+  data.frame(param = c("p", "lambda"), rhat = rhat, ess = ess, acf_lag1 = acf1, row.names = NULL)
+}
+
+diagnosticos <- do.call(rbind, lapply(PERFIS, function(g) {
+  data.frame(perfil = g, diagnosticos_mcmc(cadeias[[g]], BURN_IN))
+}))
+
+traj_mcmc <- do.call(rbind, lapply(PERFIS, function(g) {
+  do.call(rbind, lapply(seq_along(cadeias[[g]]), function(k) {
+    ch <- cadeias[[g]][[k]]
+    iter <- seq_len(nrow(ch))
+    rbind(
+      data.frame(perfil = g, cadeia = k, iter = iter, param = "p", valor = ch[, "p"]),
+      data.frame(perfil = g, cadeia = k, iter = iter, param = "lambda", valor = ch[, "lambda"])
+    )
+  }))
+}))
+traj_mcmc$perfil <- factor(traj_mcmc$perfil, levels = PERFIS)
+traj_mcmc$cadeia <- factor(traj_mcmc$cadeia)
+
+pos <- subset(traj_mcmc, cadeia == "1" & iter > BURN_IN)
+pos$media_acum <- ave(pos$valor, pos$perfil, pos$param, FUN = function(x) cumsum(x) / seq_along(x))
+
+acf_df <- do.call(rbind, lapply(PERFIS, function(g) {
+  ch <- cadeias[[g]][[1]][-seq_len(BURN_IN), ]
+  do.call(rbind, lapply(c("p", "lambda"), function(v) {
+    a <- acf(ch[, v], lag.max = 30, plot = FALSE)
+    data.frame(perfil = g, param = v, lag = a$lag[, 1, 1], acf = a$acf[, 1, 1])
+  }))
+}))
+acf_df$perfil <- factor(acf_df$perfil, levels = PERFIS)
+acf_df$param <- factor(acf_df$param, levels = c("p", "lambda"))
+```
+
+```{r fig-q7-inicio, fig.height = 5, fig.cap = "Trajetórias das 3 cadeias nas primeiras 3.000 iterações (burn-in à esquerda da linha tracejada)."}
+ggplot(subset(traj_mcmc, iter <= 3000), aes(iter, valor, colour = cadeia)) +
+  geom_line(linewidth = 0.2, alpha = 0.8) +
+  geom_vline(xintercept = BURN_IN, linetype = 2) +
+  facet_grid(param ~ perfil, scales = "free_y") +
+  labs(x = "Iteracao", y = NULL, colour = "Cadeia") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+```{r fig-q7-pos-burnin, fig.height = 4.2, fig.cap = "Trajetórias pós burn-in (cadeia 1) com a média acumulada (linha preta)."}
+ggplot(pos, aes(iter, valor)) +
+  geom_line(linewidth = 0.1, colour = "#4C78A8", alpha = 0.7) +
+  geom_line(aes(y = media_acum), colour = "black") +
+  facet_grid(param ~ perfil, scales = "free_y") +
+  labs(x = "Iteracao", y = NULL) +
+  theme_minimal(base_size = 10)
+```
+
+```{r fig-q7-autocorrelacao, fig.height = 3.8, fig.cap = "Autocorrelação das cadeias (cadeia 1, pós burn-in) nas defasagens 1 a 10. A defasagem 0, sempre igual a 1, foi omitida; a partir da 7ª os valores ficam abaixo de 0,02 em todos os perfis."}
+ggplot(subset(acf_df, lag >= 1), aes(lag, acf)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_segment(aes(xend = lag, yend = 0), colour = "#4C78A8", linewidth = 0.8) +
+  geom_point(colour = "#4C78A8", size = 1.3) +
+  facet_grid(param ~ perfil, labeller = labeller(param = label_parsed)) +
+  scale_x_continuous(breaks = 1:10) +
+  coord_cartesian(xlim = c(1, 10)) +
+  labs(x = "Defasagem", y = "Autocorrelação") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank(), strip.text.y = element_text(angle = 0))
+```
+
+```{r tab-q7, echo = FALSE}
+t_diag <- diagnosticos
+t_diag$ess <- negrito(num(t_diag$ess, 3), t_diag$ess == min(t_diag$ess))
+t_diag$acf_lag1 <- negrito(num(t_diag$acf_lag1, 3), t_diag$acf_lag1 == max(t_diag$acf_lag1))
+kab(t_diag,
+  digits = 3,
+  col.names = c("Perfil", "Parâmetro", "$\\hat R$ (Gelman-Rubin)", "Tamanho efetivo", "Autocorr. lag 1"),
+  escape = FALSE,
+  caption = "Diagnósticos de convergência. Em negrito, o pior caso: menor tamanho efetivo e maior autocorrelação."
+)
+```
+
+**Comentário.** As três cadeias partem de valores bem distantes, por exemplo $(p,\lambda)=(0{,}95;\,10)$ e
+$(0{,}05;\,0{,}5)$, mas em poucas iterações se sobrepõem e passam a oscilar em torno da mesma região. O
+burn-in de 2.000 iterações é, portanto, bastante conservador. Após o burn-in as trajetórias têm aspecto de
+"lagarta peluda" (estacionárias, sem tendência) e as médias acumuladas estabilizam. A estatística de
+Gelman-Rubin é $\hat R\approx 1{,}00$ para todos os parâmetros e os tamanhos efetivos de amostra estão na
+casa das dezenas de milhares, suficientes para estimar quantis de 2,5% e 97,5% com precisão.
+
+A autocorrelação não é desprezível, sobretudo no **perfil baixo**: com muitos zeros ambíguos, $p$ e
+$\lambda$ são fortemente correlacionados a posteriori, e o aumento de dados faz o Gibbs mover-se em passos
+menores (o mesmo fenômeno de "informação ausente" que torna o EM lento nesse perfil). No **perfil alto**, com
+poucos zeros, a autocorrelação é quase nula e a cadeia se comporta praticamente como uma amostra i.i.d. Em
+resumo, não há sinais de falta de convergência.
+
+## Questão 8: comparação final
+
+```{r q8-comparacao}
+# IC de Wald na escala (logit p, log lambda), transformado de volta
+ic_wald_zip <- function(p, lambda, s, nivel = 0.95) {
+  jac <- diag(c(p * (1 - p), lambda))
+  info <- -(t(jac) %*% hessiana_zip(p, lambda, s) %*% jac)
+  ep <- sqrt(diag(solve(info)))
+  z <- qnorm(1 - (1 - nivel) / 2)
+  theta <- c(qlogis(p), log(lambda))
+  ic <- rbind(
+    p = plogis(theta[1] + c(-1, 1) * z * ep[1]),
+    lambda = exp(theta[2] + c(-1, 1) * z * ep[2])
+  )
+  colnames(ic) <- c("li", "ls")
+  ic
+}
+
+comparacao_bayes <- do.call(rbind, lapply(PERFIS, function(g) {
+  o <- emv_optim[emv_optim$perfil == g, ]
+  e <- emv_em[emv_em$perfil == g, ]
+  ic <- ic_wald_zip(e$p, e$lambda, s_list[[g]])
+  b <- resumo_post[resumo_post$perfil == g, ]
+  rbind(
+    data.frame(
+      perfil = g, metodo = "optim()", param = c("p", "lambda"),
+      estimativa = c(o$p, o$lambda), li = NA, ls = NA
+    ),
+    data.frame(
+      perfil = g, metodo = "EM (IC de Wald)", param = c("p", "lambda"),
+      estimativa = c(e$p, e$lambda), li = ic[, "li"], ls = ic[, "ls"]
+    ),
+    data.frame(
+      perfil = g, metodo = "Bayes (mediana, IC cred.)", param = b$param,
+      estimativa = b$mediana, li = b$li, ls = b$ls
+    )
+  )
+}))
+rownames(comparacao_bayes) <- NULL
+
+wald <- subset(comparacao_bayes, metodo == "EM (IC de Wald)")
+wald$perfil <- factor(wald$perfil, levels = PERFIS)
+dens <- rbind(
+  data.frame(perfil = amostras$perfil, param = "p", valor = amostras$p),
+  data.frame(perfil = amostras$perfil, param = "lambda", valor = amostras$lambda)
+)
+```
+
+```{r tab-q8, echo = FALSE}
+kab(comparacao_bayes,
+  digits = 4,
+  col.names = c("Perfil", "Método", "Parâmetro", "Estimativa", "IC 95\\% inf.", "IC 95\\% sup."),
+  escape = FALSE, caption = "Estimativas de máxima verossimilhança e Bayesianas."
+)
+```
+
+```{r fig-q8-posteriori, fig.height = 3.8, fig.cap = "Densidades a posteriori (azul), EMV (linha vermelha) e IC de Wald de 95\\% (linhas vermelhas tracejadas)."}
+ggplot(dens, aes(valor)) +
+  geom_density(fill = "#4C78A8", alpha = 0.35, colour = "#4C78A8") +
+  geom_vline(data = wald, aes(xintercept = estimativa), colour = "red") +
+  geom_vline(data = wald, aes(xintercept = li), colour = "red", linetype = 2) +
+  geom_vline(data = wald, aes(xintercept = ls), colour = "red", linetype = 2) +
+  facet_wrap(param ~ perfil, scales = "free", nrow = 2, labeller = labeller(.multi_line = FALSE)) +
+  labs(x = NULL, y = "Densidade") +
+  theme_minimal(base_size = 10)
+```
+
+**Os resultados são coerentes.** `optim()` (no melhor início), Newton-Raphson e EM produzem exatamente o
+mesmo EMV, como deveriam: são algoritmos diferentes para o mesmo problema de otimização. As medianas a
+posteriori ficam muito próximas dos EMV e os intervalos de credibilidade praticamente coincidem com os
+intervalos de Wald (construídos na escala $(\operatorname{logit} p, \log\lambda)$ por `ic_wald_zip()`). Isso
+é esperado: com $n=400$ por perfil e prioris pouco informativas (Beta uniforme e Gamma com média 100), a
+verossimilhança domina a posteriori e vale a aproximação de Bernstein–von Mises.
+
+As pequenas diferenças vão na direção esperada: a posteriori de $p$ é levemente assimétrica, sobretudo no
+perfil alto, onde $\hat p$ está mais perto da fronteira zero, mas as diferenças são uma pequena fração do
+erro-padrão. O intervalo Bayesiano respeita naturalmente o espaço paramétrico e não depende de normalidade
+assintótica. Comparando os perfis, $p$ diminui e $\lambda$ aumenta do perfil baixo para o alto: clientes de
+maior risco são menos frequentemente "não-consultantes" e, quando consultam, o fazem com mais frequência.
 
 \newpage
 
-```{r, child = secao("03_parte3_mcmc.Rmd")}
+# Parte 4. Aplicação prática
+
+## Questão 9: valor esperado
+
+Pela representação de mistura, $Z\sim\text{Bernoulli}(p)$, $Y\mid Z=1\equiv 0$ e
+$Y\mid Z=0\sim\text{Poisson}(\lambda)$. Pela lei da esperança total,
+
+$$
+E[Y] = E\big[E[Y\mid Z]\big] = P(Z=1)\,E[Y\mid Z=1] + P(Z=0)\,E[Y\mid Z=0]
+= p\cdot 0 + (1-p)\cdot\lambda = (1-p)\lambda .
+$$
+
+(Verificação direta: $E[Y]=\sum_{k\ge1}k(1-p)e^{-\lambda}\lambda^k/k! = (1-p)\lambda\sum_{k\ge1}e^{-\lambda}
+\lambda^{k-1}/(k-1)! = (1-p)\lambda$.) Analogamente, pela lei da variância total,
+$\operatorname{Var}(Y) = E[\operatorname{Var}(Y\mid Z)] + \operatorname{Var}(E[Y\mid Z]) = (1-p)\lambda +
+\lambda^2p(1-p) = (1-p)\lambda(1+p\lambda)$, útil para avaliar o risco (`esperanca_zip()` e
+`variancia_zip()`, abaixo). Uma checagem por Monte Carlo, simulando $10^6$ clientes pela
+representação de mistura com os EMV de cada perfil:
+
+```{r q9-valor-esperado}
+esperanca_zip <- function(p, lambda) (1 - p) * lambda
+variancia_zip <- function(p, lambda) (1 - p) * lambda * (1 + p * lambda)
+
+n_mc <- 1e6
+set.seed(SEMENTE)
+verificacao <- do.call(rbind, lapply(PERFIS, function(g) {
+  e <- emv_em[emv_em$perfil == g, ]
+  z <- rbinom(n_mc, 1, e$p)
+  y <- ifelse(z == 1, 0, rpois(n_mc, e$lambda))
+  data.frame(
+    perfil = g,
+    media_mc = mean(y), erro_mc = sd(y) / sqrt(n_mc),
+    esperanca_formula = esperanca_zip(e$p, e$lambda),
+    variancia_mc = var(y), variancia_formula = variancia_zip(e$p, e$lambda)
+  )
+}))
 ```
 
-\newpage
-
-```{r, child = secao("04_parte4_aplicacao.Rmd")}
+```{r tab-q9, echo = FALSE}
+kab(verificacao,
+  digits = 4,
+  col.names = c("Perfil", "Média MC", "Erro MC", "$(1-p)\\lambda$", "Var. MC", "$(1-p)\\lambda(1+p\\lambda)$"),
+  escape = FALSE, caption = "Média e variância simuladas vs. fórmulas fechadas."
+)
 ```
 
-```{r, child = secao("05_conclusao.Rmd")}
+Com custo de R\$ 250 por consulta e lucro médio desejado de R\$ 100 por cliente, o custo esperado por
+cliente é $250\,E[Y]$, e o valor anual a cobrar é
+
+$$
+\text{Prêmio} = 250\,(1-p)\lambda + 100 .
+$$
+
+## Questão 10: valor cobrado por perfil e método
+
+Para o método Bayesiano reportamos duas versões: o *plug-in* das medianas a posteriori de $p$ e $\lambda$ (o
+que o enunciado pede) e a mediana a posteriori do próprio prêmio, calculada amostra a amostra, com seu
+intervalo de credibilidade.
+
+```{r q10-premio}
+premio_anual <- function(p, lambda, custo = CUSTO_CONSULTA, lucro = LUCRO_DESEJADO) {
+  custo * esperanca_zip(p, lambda) + lucro
+}
+
+nr_final <- nr[nr$iter == max(nr$iter), ]
+mediana_post <- function(g, v) resumo_post$mediana[resumo_post$perfil == g & resumo_post$param == v]
+premio_de <- function(tab, g) premio_anual(tab$p[tab$perfil == g], tab$lambda[tab$perfil == g])
+
+premios <- do.call(rbind, lapply(PERFIS, function(g) {
+  pr_post <- premio_anual(amostras$p[amostras$perfil == g], amostras$lambda[amostras$perfil == g])
+  q <- quantile(pr_post, c(0.025, 0.975), names = FALSE)
+  data.frame(
+    perfil = g,
+    media_amostral = mean(y_list[[g]]),
+    optim = premio_de(emv_optim, g),
+    newton_raphson = premio_de(nr_final, g),
+    em = premio_de(emv_em, g),
+    bayes_plugin = premio_anual(mediana_post(g, "p"), mediana_post(g, "lambda")),
+    bayes_mediana_premio = median(pr_post),
+    bayes_li = q[1], bayes_ls = q[2]
+  )
+}))
+
+dif_ml <- max(abs(c(premios$optim, premios$newton_raphson) - premios$em))
+dif_bayes <- max(abs(premios$bayes_plugin - premios$em))
+
+# Cada prêmio como desvio em relação a 250 * média amostral + 100
+premio_media <- CUSTO_CONSULTA * premios$media_amostral + LUCRO_DESEJADO
+metodos <- c(
+  optim = "optim()", newton_raphson = "Newton-Raphson", em = "EM",
+  bayes_plugin = "Bayes (plug-in)"
+)
+desvios <- do.call(rbind, lapply(names(metodos), function(m) {
+  data.frame(
+    perfil = premios$perfil, metodo = metodos[[m]],
+    desvio = premios[[m]] - premio_media
+  )
+}))
+desvios$desvio[abs(desvios$desvio) < 0.005] <- 0
+desvios$metodo <- factor(desvios$metodo, levels = rev(metodos))
+rotulos <- paste0(PERFIS, " (referência: R$ ", fmt_br(premio_media, 2), ")")
+desvios$painel <- factor(rotulos[match(desvios$perfil, PERFIS)], levels = rotulos)
+amplitude_ic <- premios$bayes_ls - premios$bayes_li
+```
+
+```{r tab-q10, echo = FALSE}
+difere <- function(x) abs(x - premio_media) >= 0.005
+t10 <- data.frame(
+  Perfil = premios$perfil,
+  `$\\bar y$` = fmt_br(premios$media_amostral, 3),
+  optim = negrito(fmt_br(premios$optim, 2), difere(premios$optim)),
+  `Newton-Raphson` = negrito(fmt_br(premios$newton_raphson, 2), difere(premios$newton_raphson)),
+  EM = negrito(fmt_br(premios$em, 2), difere(premios$em)),
+  `Bayes (plug-in)` = negrito(fmt_br(premios$bayes_plugin, 2), difere(premios$bayes_plugin)),
+  `Bayes (mediana do prêmio)` = negrito(
+    fmt_br(premios$bayes_mediana_premio, 2), difere(premios$bayes_mediana_premio)
+  ),
+  `IC 95% do prêmio` = paste0("[", fmt_br(premios$bayes_li, 2), "; ", fmt_br(premios$bayes_ls, 2), "]"),
+  check.names = FALSE
+)
+kab(t10,
+  escape = FALSE, align = "lrrrrrrr",
+  caption = "Valor anual a cobrar por cliente (R\\$) segundo cada método de estimação. Em negrito, os valores que diferem de $250\\,\\bar y + 100$."
+)
+```
+
+Os três métodos de máxima verossimilhança dão exatamente o mesmo prêmio, $250\,\bar y + 100$ (a razão é
+discutida na Questão 11). Num gráfico em reais, com prêmios entre R\$ 280 e R\$ 1.240, os pontos dos quatro
+métodos ficariam sobrepostos. Por isso a figura mostra quanto cada prêmio se afasta de $250\,\bar y + 100$.
+
+```{r fig-q10-premios, fig.height = 3.2, fig.cap = sprintf("Diferença entre o prêmio de cada método e $250\\,\\bar y + 100$, em reais. Os três métodos de máxima verossimilhança coincidem (diferença zero); o plug-in Bayesiano se afasta no máximo R\\$ %s. Para comparação, o IC de 95\\%% do prêmio tem amplitude de R\\$ %s a R\\$ %s.", fmt_br(dif_bayes, 2), fmt_br(min(amplitude_ic), 0), fmt_br(max(amplitude_ic), 0))}
+ggplot(desvios, aes(desvio, metodo)) +
+  geom_vline(xintercept = 0, colour = "grey60", linetype = 2) +
+  geom_point(aes(colour = metodo == "Bayes (plug-in)"), size = 3) +
+  geom_text(aes(label = fmt_br(desvio, 2)), vjust = -1, size = 3) +
+  scale_colour_manual(values = c(`FALSE` = "#4C78A8", `TRUE` = "#E45756"), guide = "none") +
+  scale_x_continuous(expand = expansion(add = 0.4)) +
+  facet_wrap(~painel) +
+  labs(x = expression("Prêmio menos a referência" ~ 250 * bar(y) + 100 ~ "(R$)"), y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Questão 11: análise
+
+**Os valores praticamente não diferem entre os métodos.** Entre `optim()`, Newton-Raphson e EM a diferença
+máxima é de `r brl(dif_ml)`, e o plug-in Bayesiano difere do EM em no máximo `r brl(dif_bayes)` por cliente
+por ano. Há uma razão teórica para isso. Mostramos na Questão 1 que o EMV satisfaz exatamente
+$(1-\hat p)\hat\lambda = \bar y$, logo os métodos de máxima verossimilhança produzem **o mesmo prêmio,
+$250\,\bar y + 100$**, independentemente de como dividem a média entre $p$ e $\lambda$. O Bayesiano difere
+minimamente porque (i) a mediana de um produto não é o produto das medianas e (ii) as prioris têm uma
+influência pequena. A incerteza amostral, medida pelo intervalo de credibilidade do prêmio (dezenas de
+reais), é muito maior do que a diferença entre métodos.
+
+**E se o método estiver mal-convergido?** Simulamos situações realistas:
+
+```{r q11-malconvergido}
+N_CLIENTES <- 400
+
+casos <- do.call(rbind, lapply(PERFIS, function(g) {
+  s <- s_list[[g]]
+  em1 <- em_zip(s, p0 = 0.95, lambda0 = 0.5, max_iter = 1)
+  opt <- ajustar_optim(s, 0.9, 0.5, "Nelder-Mead", maxit = 15)
+  gb <- gibbs_zip(s, n_iter = 30, p0 = 0.95, lambda0 = 0.5, seed = 1)
+  presos_g <- subset(multi_optim, perfil == g & metodo == "BFGS" & p < 1e-4)
+  out <- data.frame(
+    perfil = g,
+    caso = c(
+      "EMV correto", "EM parado na 1ª iteração", "optim, maxit = 15",
+      "Gibbs, 30 iter. sem burn-in"
+    ),
+    p = c(emv_em$p[emv_em$perfil == g], em1$p, opt[["p"]], median(gb[, "p"])),
+    lambda = c(
+      emv_em$lambda[emv_em$perfil == g], em1$lambda, opt[["lambda"]],
+      median(gb[, "lambda"])
+    )
+  )
+  if (nrow(presos_g) > 0) {
+    out <- rbind(out, data.frame(
+      perfil = g, caso = "BFGS preso em p = 0", p = presos_g$p[1], lambda = presos_g$lambda[1]
+    ))
+  }
+  out$premio <- premio_anual(out$p, out$lambda)
+  out$lucro_cliente <- out$premio - CUSTO_CONSULTA * mean(y_list[[g]])
+  out$resultado_carteira <- N_CLIENTES * out$lucro_cliente
+  out
+}))
+rownames(casos) <- NULL
+
+pior <- casos[casos$caso == "optim, maxit = 15", ]
+pior <- pior[which.min(pior$resultado_carteira), ]
+alto <- emv_em[emv_em$perfil == "alto", ]
+
+meta_carteira <- N_CLIENTES * LUCRO_DESEJADO
+ordem_casos <- c(
+  "EMV correto", "EM parado na 1ª iteração", "BFGS preso em p = 0",
+  "Gibbs, 30 iter. sem burn-in", "optim, maxit = 15"
+)
+casos_fig <- casos
+casos_fig$perfil <- factor(casos_fig$perfil, levels = PERFIS)
+casos_fig$caso <- factor(casos_fig$caso, levels = rev(ordem_casos))
+casos_fig$situacao <- factor(
+  ifelse(casos_fig$resultado_carteira < 0, "Prejuízo",
+    ifelse(meta_carteira - casos_fig$resultado_carteira > 500, "Abaixo do lucro desejado",
+      "Lucro desejado atingido"
+    )
+  ),
+  levels = c("Lucro desejado atingido", "Abaixo do lucro desejado", "Prejuízo")
+)
+sem_caso <- data.frame(
+  perfil = factor("baixo", levels = PERFIS),
+  caso = factor("BFGS preso em p = 0", levels = rev(ordem_casos))
+)
+```
+
+```{r tab-q11, echo = FALSE}
+t11 <- casos
+pior_do_perfil <- t11$resultado_carteira == ave(t11$resultado_carteira, t11$perfil, FUN = min)
+t11$p <- fmt_br(t11$p, 4)
+t11$lambda <- fmt_br(t11$lambda, 4)
+t11$premio <- fmt_br(t11$premio, 2)
+t11$lucro_cliente <- negrito(fmt_br(t11$lucro_cliente, 2), pior_do_perfil)
+t11$resultado_carteira <- negrito(fmt_br(t11$resultado_carteira, 2), pior_do_perfil)
+kab(t11,
+  align = "llrrrrr", escape = FALSE,
+  col.names = c(
+    "Perfil", "Situação", "$p$", "$\\lambda$", "Prêmio (R\\$)",
+    "Lucro esp./cliente", "Resultado esp. (400 clientes)"
+  ),
+  caption = "Impacto de estimativas mal-convergidas (lucro esperado calculado com $E[Y]$ estimado por $\\bar y$). Em negrito, a pior situação de cada perfil."
+)
+```
+
+```{r fig-q11-lucro, fig.height = 4, fig.cap = "Resultado esperado da carteira de 400 clientes de cada perfil quando $(p,\\lambda)$ vem de um ajuste correto ou mal-convergido. A linha tracejada marca o lucro desejado (R\\$ 40 mil) e a linha cheia, o zero. O leitor deve notar que só o \\texttt{optim()} interrompido cedo afasta o resultado da meta de forma relevante, chegando a prejuízo nos perfis médio e alto; o EM parado cedo e o BFGS preso em $p=0$ acertam a meta. No perfil baixo o BFGS não ficou preso em nenhum início."}
+ggplot(casos_fig, aes(resultado_carteira / 1000, caso)) +
+  geom_col(aes(fill = situacao), width = 0.7) +
+  geom_vline(xintercept = 0, colour = "grey30") +
+  geom_vline(aes(xintercept = meta_carteira / 1000, linetype = "Lucro desejado (R$ 40 mil)")) +
+  geom_text(
+    aes(
+      label = fmt_br(resultado_carteira / 1000, 1),
+      hjust = ifelse(resultado_carteira > 5000, 1.15, ifelse(resultado_carteira < 0, 1.15, -0.15)),
+      colour = resultado_carteira > 5000
+    ),
+    size = 2.8
+  ) +
+  scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = "black"), guide = "none") +
+  scale_linetype_manual(values = "dashed", name = NULL) +
+  geom_text(
+    data = sem_caso, aes(x = 0, y = caso, label = "não ocorreu"),
+    hjust = -0.1, size = 2.8, colour = "grey50", fontface = "italic"
+  ) +
+  scale_fill_manual(
+    values = c(
+      `Lucro desejado atingido` = "#4C78A8", `Abaixo do lucro desejado` = "#F2A541",
+      `Prejuízo` = "#E45756"
+    ),
+    drop = FALSE
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.25, 0.2))) +
+  facet_wrap(~perfil) +
+  labs(
+    x = "Resultado esperado da carteira (R$ mil)", y = NULL, fill = NULL,
+    title = "Quanto a má convergência custa ao plano"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
+Os resultados mostram situações bem distintas:
+
+1. **`optim()` interrompido cedo** é o caso perigoso. As estimativas ainda carregam o ponto inicial e
+   $(1-p)\lambda$ fica longe de $\bar y$. No perfil `r pior$perfil`, o prêmio cai para `r brl(pior$premio)`
+   e o lucro esperado por cliente fica em `r brl(pior$lucro_cliente)`: em vez de lucrar R\$ 40.000 com os
+   400 clientes, o plano teria resultado esperado de `r brl(pior$resultado_carteira)`. O erro não é ruído que
+   se compensa, é um **viés sistemático** na mesma direção para todos os contratos do perfil, e o prejuízo
+   cresce linearmente com o tamanho da carteira. Se o erro fosse para cima, o plano cobraria caro demais,
+   perderia competitividade e tenderia a reter apenas clientes de maior risco (seleção adversa).
+2. **MCMC curto e sem burn-in.** Com só 30 iterações a partir de um ponto ruim, a mediana ainda é contaminada
+   pelo início e o prêmio erra alguns reais. Nestes dados a cadeia mistura rápido, então o estrago é
+   moderado, mas sem diagnósticos não haveria como saber disso.
+3. **EM parado na 1ª iteração.** Os parâmetros ainda estão errados, mas o prêmio já é exatamente o correto,
+   porque, como mostramos na Questão 3, toda iteração do EM satisfaz $(1-p^{(t)})\lambda^{(t)}=\bar y$.
+4. **Falsa convergência do BFGS em $p=0$.** Também deixa o prêmio intacto, porque o EMV da Poisson satisfaz
+   $\hat\lambda = \bar y$.
+
+Os casos 3 e 4 trazem uma lição importante: **um prêmio correto não prova que o modelo esteja correto**. Como
+a precificação pela média depende apenas de $(1-p)\lambda$, ela é insensível a erros que preservam esse
+produto. Mas qualquer decisão que dependa da forma da distribuição seria afetada. A variância
+$(1-p)\lambda(1+p\lambda)$, que entra no cálculo de reservas técnicas e de margem de risco, seria subestimada
+(no caso extremo $p=0$ ela vira $\bar y$, contra `r fmt_br(variancia_zip(alto$p, alto$lambda), 2)` no perfil
+alto). A proporção de clientes que nunca usam o plano, relevante para descontos ou programas de prevenção,
+também ficaria errada. Por fim, se perfis diferentes fossem estimados com qualidades diferentes de
+convergência, a tabela de preços poderia até inverter a ordem de risco entre perfis.
+
+**Recomendações.** Sempre (i) rodar o otimizador a partir de vários inícios e comparar $\ell$; (ii) checar o
+gradiente no ponto final e as condições analíticas conhecidas (aqui, $\hat D = n_0/n$ e
+$(1-\hat p)\hat\lambda=\bar y$); (iii) para o EM, usar critério de parada rigoroso e monitorar $\ell$; (iv)
+para MCMC, usar várias cadeias, burn-in adequado e diagnósticos ($\hat R$, ESS, trajetórias).
+
+# Conclusão
+
+```{r tab-conclusao, echo = FALSE}
+resumo_final <- data.frame(
+  Perfil = PERFIS,
+  p_emv = emv_em$p, lambda_emv = emv_em$lambda,
+  p_bayes = vapply(PERFIS, mediana_post, numeric(1), v = "p"),
+  lambda_bayes = vapply(PERFIS, mediana_post, numeric(1), v = "lambda"),
+  esperanca = esperanca_zip(emv_em$p, emv_em$lambda),
+  premio = premio_anual(emv_em$p, emv_em$lambda)
+)
+for (col in names(resumo_final)[-1]) {
+  x <- resumo_final[[col]]
+  resumo_final[[col]] <- negrito(num(x, 3), x == max(x))
+}
+kab(resumo_final,
+  escape = FALSE,
+  col.names = c(
+    "Perfil", "$p$ (EMV)", "$\\lambda$ (EMV)", "$p$ (Bayes)", "$\\lambda$ (Bayes)",
+    "$E[Y]$", "Prêmio (R\\$)"
+  ),
+  caption = "Resumo final por perfil. Em negrito, o maior valor de cada coluna."
+)
+```
+
+O modelo ZIP descreve bem os três perfis, que apresentam excesso de zeros claro. A probabilidade de zero
+estrutural cai do perfil baixo para o alto e a taxa de consultas dos clientes ativos sobe. Os métodos de
+máxima verossimilhança concordam entre si quando convergem de fato, e a inferência Bayesiana é coerente com
+eles. Do ponto de vista computacional, o Newton-Raphson é o mais rápido localmente mas frágil globalmente, o
+EM é lento mas robusto e monótono, o `optim()` exige vários inícios para evitar falsas convergências, e o
+Gibbs fornece a incerteza completa a um custo computacional maior. Para a precificação, o prêmio depende
+apenas de $(1-p)\lambda$, que a máxima verossimilhança estima exatamente por $\bar y$. Isso torna o preço
+robusto à escolha do método, **desde que** o algoritmo tenha convergido.
+
+```{r sessao, echo = FALSE}
+cat("Ambiente:", R.version.string, "| semente:", SEMENTE, "\n")
 ```
